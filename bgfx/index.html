@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>bgfx Track — SDL3 Recipes</title>
-    <meta name="description" content="Twelve C++ callback-style SDL3 recipes that drive bgfx — a graphics-API-agnostic renderer (Metal / Vulkan / D3D / OpenGL behind one API). From wiring SDL3's native window handle into bgfx to a lit, textured, instanced scene, with the full shaderc cross-backend shader workflow.">
+    <meta name="description" content="Sixteen C++ callback-style SDL3 recipes that drive bgfx — a graphics-API-agnostic renderer (Metal / Vulkan / D3D / OpenGL behind one API). From wiring SDL3's native window handle into bgfx to a lit, textured, instanced scene, mesh loading, picking, bloom and GPU compute — with the full shaderc cross-backend shader workflow.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,15 +19,15 @@
 <header class="hero">
     <h1>bgfx Track</h1>
     <p class="lede">
-        Twelve recipes that pair SDL3 with <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
+        Sixteen recipes that pair SDL3 with <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
         — a "bring your own engine", graphics-API-agnostic renderer that puts
         Metal, Vulkan, Direct3D and OpenGL behind one C++ API. SDL3 owns the
         window, events and timing; bgfx owns the pixels. You'll learn the one
         thing the <a href="../2d/index.html">2D</a> and <a href="../3d/index.html">3D</a>
         tracks never have to — how to pull a native window handle out of SDL3
         and hand it to a third-party renderer — then build up to a lit,
-        textured, instanced scene with shaders authored once and compiled to
-        every backend.
+        textured, instanced scene, and on to mesh loading, picking, bloom and
+        GPU compute, with shaders authored once and compiled to every backend.
     </p>
 </header>
 
@@ -93,6 +93,26 @@
         <li><span class="num">12</span>
             <span class="title"><a href="12-capstone-scene.html">Capstone: Lit, Textured, Instanced Scene</a>
             <div class="blurb">Everything from 01–11 in one file — shaderc shaders, a textured + lit instanced grid, an SDL3 mouse-driven orbit camera, and the live stats overlay.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">13</span>
+            <span class="title"><a href="13-loading-a-mesh.html">Loading a Mesh</a>
+            <div class="blurb">Parse an embedded Wavefront <code>.obj</code> into <code>createVertexBuffer</code> / <code>createIndexBuffer</code> — and when to <code>copy</code> vs <code>makeRef</code>.</div></span>
+            <span class="badge badge-intermediate">Intermediate</span></li>
+
+        <li><span class="num">14</span>
+            <span class="title"><a href="14-mouse-picking.html">Mouse Picking</a>
+            <div class="blurb">Unproject the cursor into a world ray through the inverse view-projection, ray-AABB the grid, highlight the hit.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">15</span>
+            <span class="title"><a href="15-post-processing-and-bloom.html">Post-Processing &amp; Bloom</a>
+            <div class="blurb">A five-view chain — scene into an HDR framebuffer, bright-pass, separable Gaussian blur, additive composite.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">16</span>
+            <span class="title"><a href="16-compute-shaders.html">Compute Shaders</a>
+            <div class="blurb"><code>BUFFER_RW</code> + <code>bgfx::dispatch</code> step a particle buffer the next view draws as points — all on the GPU.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
 
     </ul>

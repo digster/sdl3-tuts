@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>16 · Compute Shaders — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>16. Compute Shaders</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 16 — Compute Shaders</h1>
+    <p class="tagline">
+        Simulate on the GPU. A bgfx compute program steps a buffer of particles
+        every frame, and the very same buffer is drawn as a point cloud — the
+        data never touches the CPU.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Authoring a bgfx compute shader with <code>BUFFER_RW</code> and <code>NUM_THREADS</code>.</li>
+        <li>A dynamic vertex buffer flagged for compute read/write <em>and</em> drawing.</li>
+        <li><code>bgfx::dispatch</code> on one view, then drawing the result on the next.</li>
+        <li>Letting bgfx insert the compute→vertex barrier so the passes stay correct.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="11-instancing.html">Recipe 11</a> for buffers-as-data and the
+        <code>shaderc</code> workflow from <a href="04-shaders-with-shaderc.html">recipe
+        04</a> — compute shaders compile the same way, just with a
+        <code>compute</code> profile.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>A buffer the GPU owns end to end</h3>
+    <p>
+        The particles live in a <strong>dynamic vertex buffer</strong> created
+        with two compute flags so the kernel can read and write it, while its
+        vertex layout still lets the render pass draw it. One buffer, simulated
+        and drawn entirely on the GPU.
+    </p>
+<pre><code class="language-cpp">layout.begin()
+    .add(bgfx::Attrib::Position,  4, bgfx::AttribType::Float)   // xyz + life
+    .add(bgfx::Attrib::TexCoord0, 4, bgfx::AttribType::Float)   // xyz velocity + _
+    .end();
+st-&gt;buffer = bgfx::createDynamicVertexBuffer(
+    bgfx::copy(init.data(), uint32_t(init.size() * sizeof(Particle))), layout,
+    BGFX_BUFFER_COMPUTE_READ | BGFX_BUFFER_COMPUTE_WRITE);
+</code></pre>
+    <p>
+        Each particle is two <code>vec4</code>s — position+life and velocity —
+        so 32 bytes, matching the layout's stride.
+    </p>
+
+    <h3>The compute shader</h3>
+    <p>
+        bgfx compute shaders <code>#include "bgfx_compute.sh"</code>, declare
+        read/write buffers with <code>BUFFER_RW</code>, and set their workgroup
+        size with <code>NUM_THREADS</code>. Each invocation handles one particle,
+        keyed off <code>gl_GlobalInvocationID</code>.
+    </p>
+<pre><code># cs_particles.sc — gravity fountain; respawn at the nozzle when life runs out
+#include "bgfx_compute.sh"
+BUFFER_RW(b_particles, vec4, 0);
+uniform vec4 u_params;          // x = dt, y = count, z = time
+NUM_THREADS(64, 1, 1)
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (float(id) &gt;= u_params.y) return;
+    vec4 p = b_particles[id * 2u + 0u];     // xyz pos, w life
+    vec4 v = b_particles[id * 2u + 1u];     // xyz velocity
+    v.y   -= 1.5 * u_params.x;               // gravity
+    p.xyz += v.xyz * u_params.x;
+    p.w   -= u_params.x;                      // age
+    if (p.w &lt;= 0.0) {                         // reborn at the nozzle
+        float r = fract(sin(float(id) * 12.9898 + u_params.z) * 43758.5453);
+        float a = r * 6.2831;
+        p = vec4(0.0, -1.6, 0.0, 1.5 + r);
+        v = vec4(cos(a) * 1.1, 2.4 + r, sin(a) * 1.1, 0.0);
+    }
+    b_particles[id * 2u + 0u] = p;
+    b_particles[id * 2u + 1u] = v;
+}
+</code></pre>
+
+    <h3>Dispatch, then draw</h3>
+    <p>
+        Bind the buffer for the compute view with <code>setBuffer(..., Access::ReadWrite)</code>
+        and <code>dispatch</code> one workgroup per 64 particles. Then, on the
+        <em>next</em> view, draw the same handle as a point list. bgfx sees that a
+        buffer written by compute on view 0 is read as vertices on view 1 and
+        inserts the barrier for you.
+    </p>
+<pre><code class="language-cpp">// view 0 — simulate
+bgfx::setUniform(st-&gt;u_params, params);
+bgfx::setBuffer(0, st-&gt;buffer, bgfx::Access::ReadWrite);
+bgfx::dispatch(0, st-&gt;compute, (N + 63) / 64, 1, 1);
+
+// view 1 — draw the same buffer
+bgfx::setViewTransform(1, view, proj);
+bgfx::setVertexBuffer(0, st-&gt;buffer);
+bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_PT_POINTS);
+bgfx::submit(1, st-&gt;render);
+</code></pre>
+    <div class="note">
+        <strong>One buffer, two stages.</strong> Because the data is born,
+        simulated and drawn without ever leaving GPU memory, this scales to
+        millions of particles. It's also how bgfx does N-body, cloth and fluid
+        demos.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A 65k-particle gravity fountain. The CPU only ticks the clock and counts
+        workgroups; the GPU does the rest. Build
+        <code>cs_particles</code> / <code>vs_particle</code> /
+        <code>fs_particle</code> with <code>shaderc</code> (use the
+        <code>compute</code> profile for the first).
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/16-compute-shaders.cpp — GPU particle fountain simulated in compute,
+ * drawn from the same dynamic vertex buffer.
+ * Shaders: cs_particles (compute), vs_particle / fs_particle.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+#include &lt;vector&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+static bgfx::ProgramHandle loadComputeProgram(const char *cs);
+
+static const int N = 65536;
+struct Particle { float pos[4]; float vel[4]; };   // pos.xyz+life, vel.xyz
+
+struct AppState {
+    SDL_Window *window = nullptr;
+    int width = 1280, height = 720;
+    bgfx::DynamicVertexBufferHandle buffer = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle compute = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle render  = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_params = BGFX_INVALID_HANDLE;
+    Uint64 startNs = 0, lastNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Compute", "1.0", "com.example.sdl3.bgfx.compute");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Compute Shaders", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type              = bgfx::RendererType::Count;
+    init.platformData.nwh  = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt  = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width  = (uint32_t)st-&gt;width;
+    init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset  = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+
+    if (!(bgfx::getCaps()-&gt;supported &amp; BGFX_CAPS_COMPUTE)) return fail("compute unsupported");
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position,  4, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 4, bgfx::AttribType::Float).end();
+
+    // Seed the particles with staggered lifetimes so the fountain fills in.
+    std::vector&lt;Particle&gt; seed(N);
+    for (int i = 0; i &lt; N; ++i) {
+        float r = SDL_randf(), a = SDL_randf() * 6.2831f;
+        seed[i] = { { 0, -1.6f, 0, SDL_randf() * 2.0f },
+                    { SDL_cosf(a)*1.1f, 2.4f + r, SDL_sinf(a)*1.1f, 0 } };
+    }
+    st-&gt;buffer = bgfx::createDynamicVertexBuffer(
+        bgfx::copy(seed.data(), uint32_t(seed.size()*sizeof(Particle))), layout,
+        BGFX_BUFFER_COMPUTE_READ | BGFX_BUFFER_COMPUTE_WRITE);
+
+    st-&gt;compute  = loadComputeProgram("cs_particles");
+    st-&gt;render   = loadProgram("vs_particle", "fs_particle");
+    st-&gt;u_params = bgfx::createUniform("u_params", bgfx::UniformType::Vec4);
+    if (!bgfx::isValid(st-&gt;compute) || !bgfx::isValid(st-&gt;render)) return fail("loadProgram");
+
+    st-&gt;startNs = st-&gt;lastNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;lastNs) / 1.0e9f; if (dt &gt; 0.05f) dt = 0.05f;
+    st-&gt;lastNs = now;
+    float time = (now - st-&gt;startNs) / 1.0e9f;
+
+    // --- view 0: simulate ---
+    float params[4] = { dt, (float)N, time, 0 };
+    bgfx::setUniform(st-&gt;u_params, params);
+    bgfx::setBuffer(0, st-&gt;buffer, bgfx::Access::ReadWrite);
+    bgfx::dispatch(0, st-&gt;compute, (N + 63) / 64, 1, 1);
+
+    // --- view 1: draw the same buffer as points ---
+    bgfx::setViewClear(1, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x05060aff, 1.0f, 0);
+    bgfx::setViewRect(1, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+    const bx::Vec3 at = { 0, 0, 0 }, eye = { 0, 0.5f, -6 };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 60.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 100.0f, bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(1, view, proj);
+
+    float mtx[16]; bx::mtxRotateY(mtx, time * 0.2f);
+    bgfx::setTransform(mtx);
+    bgfx::setVertexBuffer(0, st-&gt;buffer);
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_PT_POINTS);
+    bgfx::submit(1, st-&gt;render);
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (bgfx::isValid(st-&gt;u_params)) bgfx::destroy(st-&gt;u_params);
+    if (bgfx::isValid(st-&gt;buffer))   bgfx::destroy(st-&gt;buffer);
+    if (bgfx::isValid(st-&gt;render))   bgfx::destroy(st-&gt;render);
+    if (bgfx::isValid(st-&gt;compute))  bgfx::destroy(st-&gt;compute);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+<pre><code># vs_particle.sc / fs_particle.sc — colour points by remaining life.
+# (vs)
+$input  a_position, a_texcoord0
+$output v_color0
+#include "bgfx_shader.sh"
+void main() {
+    gl_Position = mul(u_modelViewProj, vec4(a_position.xyz, 1.0));
+    float life  = a_position.w;
+    v_color0    = vec4(0.6 + 0.4 * life, 0.45, 1.0 - 0.3 * life, 1.0);
+}
+# (fs)
+$input v_color0
+#include "bgfx_shader.sh"
+void main() { gl_FragColor = v_color0; }
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Add mouse attraction: feed the cursor's world position in <code>u_params</code> and steer velocities toward it.</li>
+        <li>Push <code>N</code> to a million. Only the dispatch count changes; the fountain just gets denser.</li>
+        <li>Expand points into camera-facing quads with an instanced draw so particles have real size, not one pixel.</li>
+        <li>Double-buffer the particles (read one, write the other, swap) if you add neighbour interactions that must read a consistent previous state.</li>
+    </ol>
+    <p>
+        That's the bgfx track: from <a href="01-hello-bgfx.html">handing SDL3's
+        window to bgfx</a> all the way to the GPU simulating and drawing its own
+        geometry. Head back to the <a href="../index.html">track picker</a> to
+        compare how the same ideas land in SDL_Renderer and SDL_GPU.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="15-post-processing-and-bloom.html">← Prev: Post-Processing &amp; Bloom</a>
+    <a href="index.html">Index</a>
+    <a href="../index.html">All tracks →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 16
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

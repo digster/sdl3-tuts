@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>3D Track — SDL3 Recipes</title>
-    <meta name="description" content="Thirteen C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle to a textured, lit, camera-controlled scene and cross-platform shaders via SDL_shadercross.">
+    <meta name="description" content="Seventeen C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, to GPU compute.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,10 +19,10 @@
 <header class="hero">
     <h1>3D Track</h1>
     <p class="lede">
-        Thirteen recipes that take you from the "hello triangle" to a textured,
-        lit cube you can fly around with an FPS camera — and finally to
-        cross-platform shaders authored once in HLSL and shipped to every
-        backend. All in C++ using SDL3's <code>SDL_GPU</code> API (Metal /
+        Seventeen recipes that take you from the "hello triangle" to a textured,
+        lit cube you can fly around with an FPS camera, then on through
+        cross-platform shaders, skyboxes, normal and shadow mapping, and finally
+        GPU compute. All in C++ using SDL3's <code>SDL_GPU</code> API (Metal /
         Vulkan / D3D12 under one abstraction).
     </p>
 </header>
@@ -96,13 +96,33 @@
             <div class="blurb">Author shaders once in HLSL; ship one binary that runs on Metal, Vulkan and D3D12. Both the runtime and offline workflows, via <code>SDL_shadercross</code>.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
 
+        <li><span class="num">14</span>
+            <span class="title"><a href="14-skybox-and-cubemaps.html">Skybox &amp; Cubemaps</a>
+            <div class="blurb">A six-faced cubemap sampled by view direction, drawn behind the scene with the <code>position.xyww</code> depth trick.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">15</span>
+            <span class="title"><a href="15-normal-mapping.html">Normal Mapping</a>
+            <div class="blurb">Tangent space and the TBN matrix — per-pixel normals make a flat quad ripple under a moving light.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">16</span>
+            <span class="title"><a href="16-shadow-mapping.html">Shadow Mapping</a>
+            <div class="blurb">Render depth from the light's point of view, sample it in the main pass — real cast shadows, plus the bias that tames acne.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">17</span>
+            <span class="title"><a href="17-compute-shaders.html">Compute Shaders</a>
+            <div class="blurb">An <code>SDL_GPU</code> compute pipeline steps a GPU particle simulation into a buffer the render pass then draws.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
     </ul>
 </section>
 
 <section>
     <h2>How to run the code</h2>
     <p>
-        For recipes 01–12, every <em>Complete listing</em> is a drop-in
+        For recipes 01–12 and 14–17, every <em>Complete listing</em> is a drop-in
         replacement for
         <a href="../../examples/cpp-gpu/triangle.cpp">examples/cpp-gpu/triangle.cpp</a>.
         Replace that file's contents, then build with <code>make run-gpu</code>
