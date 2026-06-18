@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>16 · Render Targets &amp; Screen Effects — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>16. Render Targets &amp; Screen Effects</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 16 — Render Targets &amp; Screen Effects</h1>
+    <p class="tagline">
+        Render the whole game into an offscreen texture at a fixed low
+        resolution, then blit it to the window — and get crisp pixel-art
+        scaling, letterboxing, screen shake and flash transitions for free.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Creating a target texture with <code>SDL_TEXTUREACCESS_TARGET</code> and drawing into it with <code>SDL_SetRenderTarget</code>.</li>
+        <li>Decoupling your game's <em>internal</em> resolution from the window size.</li>
+        <li>Integer/aspect-fit scaling with letterbox bars when you present the target.</li>
+        <li>Two cheap effects the offscreen pass makes trivial: screen shake and a full-screen flash/fade.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="05-loading-textures.html">Recipe 05</a> for textures and
+        <a href="04-delta-time.html">recipe 04</a> for delta-time timers. This
+        is the 2D cousin of the 3D and bgfx render-to-texture recipes.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>A texture you can draw onto</h3>
+    <p>
+        Pass <code>SDL_TEXTUREACCESS_TARGET</code> to
+        <code>SDL_CreateTexture</code> and the renderer can point its output at
+        that texture instead of the window. We size it to a fixed internal
+        resolution — say 320×180 — and render the entire game there, never
+        caring how big the window is.
+    </p>
+<pre><code class="language-cpp">st-&gt;target = SDL_CreateTexture(st-&gt;renderer, SDL_PIXELFORMAT_RGBA8888,
+                              SDL_TEXTUREACCESS_TARGET, GAME_W, GAME_H);
+// Pixel-art crispness: nearest-neighbour when we scale it up.
+SDL_SetTextureScaleMode(st-&gt;target, SDL_SCALEMODE_NEAREST);
+</code></pre>
+
+    <h3>Render into it, then back to the screen</h3>
+    <p>
+        Bind the target, draw the scene in internal coordinates, then bind
+        <code>nullptr</code> to go back to the window and draw the target as one
+        big textured quad. Everything between the two
+        <code>SDL_SetRenderTarget</code> calls lands in the texture.
+    </p>
+<pre><code class="language-cpp">SDL_SetRenderTarget(st-&gt;renderer, st-&gt;target);   // ---- offscreen ----
+gfx::clear(st-&gt;renderer, 18, 20, 30);
+/* ...draw the game at 320x180... */
+
+SDL_SetRenderTarget(st-&gt;renderer, nullptr);      // ---- back to window ----
+gfx::clear(st-&gt;renderer, 0, 0, 0);
+SDL_RenderTexture(st-&gt;renderer, st-&gt;target, nullptr, &amp;dst);
+</code></pre>
+
+    <h3>Letterbox scaling</h3>
+    <p>
+        To fill the window without distorting the art, scale by the smaller of
+        the two axis ratios and centre the result. The leftover space becomes
+        the black bars — the classic letterbox/pillarbox.
+    </p>
+<pre><code class="language-cpp">static SDL_FRect fit_rect(int win_w, int win_h)
+{
+    float scale = SDL_min((float)win_w / GAME_W, (float)win_h / GAME_H);
+    float w = GAME_W * scale, h = GAME_H * scale;
+    return SDL_FRect{ (win_w - w) * 0.5f, (win_h - h) * 0.5f, w, h };
+}
+</code></pre>
+
+    <h3>Shake and flash, almost for free</h3>
+    <p>
+        Because the whole frame is one texture, you can perturb the
+        <em>entire image</em> at present time. <strong>Screen shake</strong> is a
+        random offset added to the destination rect, its magnitude decaying over
+        time. A <strong>flash</strong> is a translucent full-window rectangle
+        whose alpha fades out — great for hits, pickups and scene transitions.
+    </p>
+<pre><code class="language-cpp">// Decaying shake offset.
+float s = st-&gt;shake;                                  // 0..1, ticks down each frame
+dst.x += (SDL_randf() * 2 - 1) * 8.0f * s;
+dst.y += (SDL_randf() * 2 - 1) * 8.0f * s;
+
+// Fading white flash over the top.
+if (st-&gt;flash &gt; 0) {
+    SDL_SetRenderDrawBlendMode(st-&gt;renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(st-&gt;renderer, 255, 255, 255, (Uint8)(st-&gt;flash * 255));
+    SDL_RenderFillRect(st-&gt;renderer, nullptr);        // nullptr = the whole target
+}
+</code></pre>
+
+    <div class="note">
+        <strong>Why fixed internal resolution?</strong> Your gameplay,
+        collision and art all work in one stable coordinate space no matter the
+        monitor. The single scale-up at the end keeps pixels sharp and your code
+        resolution-independent — the bedrock of pixel-art games.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A bouncing square rendered at 320×180, scaled to fill the window with
+        letterbox bars. Press Space to shake the screen and flash white; resize
+        the window and the bars adjust while the pixels stay crisp.
+    </p>
+<pre><code class="language-cpp">/*
+ * 16-render-targets.cpp — fixed-res offscreen target, letterbox present,
+ * screen shake + flash.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const int GAME_W = 320, GAME_H = 180;
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture  *target = nullptr;
+    float  bx = 40, by = 30, vx = 90, vy = 70;    // bouncing square
+    float  shake = 0.0f, flash = 0.0f;             // both decay to zero
+    Uint64 last_ns = 0;
+};
+
+static SDL_FRect fit_rect(int win_w, int win_h)
+{
+    float scale = SDL_min((float)win_w / GAME_W, (float)win_h / GAME_H);
+    float w = GAME_W * scale, h = GAME_H * scale;
+    return SDL_FRect{ (win_w - w) * 0.5f, (win_h - h) * 0.5f, w, h };
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Render Targets", "1.0", "com.example.sdl3.rendertarget");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Render Targets", 960, 540,
+                                     SDL_WINDOW_RESIZABLE, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    st-&gt;target = SDL_CreateTexture(st-&gt;renderer, SDL_PIXELFORMAT_RGBA8888,
+                                   SDL_TEXTUREACCESS_TARGET, GAME_W, GAME_H);
+    if (!st-&gt;target) { SDL_Log("target: %s", SDL_GetError()); delete st; return SDL_APP_FAILURE; }
+    SDL_SetTextureScaleMode(st-&gt;target, SDL_SCALEMODE_NEAREST);
+
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (e-&gt;key.scancode == SDL_SCANCODE_SPACE) { st-&gt;shake = 1.0f; st-&gt;flash = 0.8f; }
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    // --- update (internal-resolution space) ---
+    st-&gt;bx += st-&gt;vx * dt; st-&gt;by += st-&gt;vy * dt;
+    if (st-&gt;bx &lt; 0 || st-&gt;bx &gt; GAME_W - 24) { st-&gt;vx = -st-&gt;vx; st-&gt;shake = SDL_max(st-&gt;shake, 0.5f); }
+    if (st-&gt;by &lt; 0 || st-&gt;by &gt; GAME_H - 24) { st-&gt;vy = -st-&gt;vy; st-&gt;shake = SDL_max(st-&gt;shake, 0.5f); }
+    st-&gt;shake = SDL_max(0.0f, st-&gt;shake - dt * 2.0f);
+    st-&gt;flash = SDL_max(0.0f, st-&gt;flash - dt * 2.0f);
+
+    // --- pass A: draw the game into the target ---
+    SDL_SetRenderTarget(st-&gt;renderer, st-&gt;target);
+    gfx::clear(st-&gt;renderer, 18, 20, 30);
+    for (int i = 0; i &lt; 5; ++i) {           // a little parallax grid
+        gfx::set_color(st-&gt;renderer, 40, 46, 64, 255);
+        gfx::fill_rect(st-&gt;renderer, i * 64.0f, 0, 2, GAME_H);
+    }
+    gfx::set_color(st-&gt;renderer, 120, 200, 255, 255);
+    gfx::fill_rect(st-&gt;renderer, st-&gt;bx, st-&gt;by, 24, 24);
+
+    // --- pass B: present the target to the window, scaled + shaken ---
+    SDL_SetRenderTarget(st-&gt;renderer, nullptr);
+    gfx::clear(st-&gt;renderer, 0, 0, 0);
+
+    int win_w = 960, win_h = 540;
+    SDL_GetRenderOutputSize(st-&gt;renderer, &amp;win_w, &amp;win_h);
+    SDL_FRect dst = fit_rect(win_w, win_h);
+    float s = st-&gt;shake;
+    dst.x += (SDL_randf() * 2 - 1) * 10.0f * s;
+    dst.y += (SDL_randf() * 2 - 1) * 10.0f * s;
+    SDL_RenderTexture(st-&gt;renderer, st-&gt;target, nullptr, &amp;dst);
+
+    if (st-&gt;flash &gt; 0) {
+        SDL_SetRenderDrawBlendMode(st-&gt;renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(st-&gt;renderer, 255, 255, 255, (Uint8)(st-&gt;flash * 255));
+        SDL_RenderFillRect(st-&gt;renderer, nullptr);
+    }
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        if (st-&gt;target) SDL_DestroyTexture(st-&gt;target);
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Force <em>integer</em> scaling only (round the scale down to a whole number). Pixels become perfectly uniform — no shimmering — at the cost of slightly thicker bars.</li>
+        <li>Add a second target the same size and cross-fade between them to transition between scenes.</li>
+        <li>Tint the flash per event: white for a pickup, red for damage. Drive its colour from state instead of hard-coding white.</li>
+        <li>Sample the target a second time, offset and dimmed, before the main blit — a one-line bloom-ish glow.</li>
+    </ol>
+    <p>
+        That's the 2D track end-to-end: from <a href="01-hello-window.html">a
+        blank window</a> to a controller-driven, audio-mixing, save-backed game
+        rendered through an offscreen pixel-art pipeline.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="15-save-load-and-ui.html">← 15. Save/Load &amp; Simple UI</a>
+    <a href="index.html">Index</a>
+    <a href="../3d/index.html">3D Track →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 16
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

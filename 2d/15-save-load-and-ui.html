@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>15 · Save/Load &amp; Simple UI — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>15. Save/Load &amp; Simple UI</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 15 — Save/Load &amp; Simple UI</h1>
+    <p class="tagline">
+        Persist a high score to the right place on disk, and build clickable
+        buttons with hover and a tiny menu state machine — no UI library, just
+        rectangles and the mouse.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Where save data belongs: <code>SDL_GetPrefPath</code>, not next to the binary.</li>
+        <li>Reading and writing a small file with <code>SDL_LoadFile</code> and <code>SDL_IOStream</code>.</li>
+        <li>An immediate-mode button: hit-test a rectangle against the cursor, react to hover and click.</li>
+        <li>A minimal screen/menu state machine to glue it together.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="03-handling-input.html">Recipe 03</a> for mouse events and
+        <a href="09-text-rendering.html">recipe 09</a> for the bitmap-font
+        <code>draw_text</code> — we reuse it verbatim to label the buttons (its
+        glyph table is elided in the listing below).
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Where does save data go?</h3>
+    <p>
+        Writing next to your executable breaks the moment the app is installed
+        somewhere read-only — which is every real install. SDL hands you the
+        correct per-user, writable directory for your app with
+        <code>SDL_GetPrefPath(org, app)</code>. It creates the folder if needed
+        and returns a string you own.
+    </p>
+<pre><code class="language-cpp">char *base = SDL_GetPrefPath("ExampleCo", "Recipes");   // e.g. ~/Library/Application Support/...
+SDL_snprintf(st-&gt;save_path, sizeof(st-&gt;save_path), "%ssave.dat", base);
+SDL_free(base);
+</code></pre>
+
+    <h3>Loading: one call</h3>
+    <p>
+        <code>SDL_LoadFile</code> slurps an entire file into a freshly allocated
+        buffer and tells you the size. A missing file just returns
+        <code>nullptr</code> — that's our "no save yet" case, not an error to
+        panic over.
+    </p>
+<pre><code class="language-cpp">size_t len = 0;
+void *data = SDL_LoadFile(st-&gt;save_path, &amp;len);
+if (data &amp;&amp; len &gt;= sizeof(int)) SDL_memcpy(&amp;st-&gt;hi_score, data, sizeof(int));
+SDL_free(data);                                  // free() handles nullptr fine
+</code></pre>
+
+    <h3>Saving: open, write, close</h3>
+    <p>
+        For writing we open an <code>SDL_IOStream</code> in binary-write mode,
+        push the bytes, and close it. Here the payload is a single
+        <code>int</code>; for anything structured you'd serialise a struct (mind
+        endianness if the file must be portable across machines).
+    </p>
+<pre><code class="language-cpp">static void save_score(const char *path, int score)
+{
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) { SDL_Log("save: %s", SDL_GetError()); return; }
+    SDL_WriteIO(io, &amp;score, sizeof(score));
+    SDL_CloseIO(io);
+}
+</code></pre>
+
+    <h3>A button you can click</h3>
+    <p>
+        No widget toolkit required. A button is a rectangle, a label, and two
+        questions each frame: is the cursor inside it (hover), and was it
+        clicked this frame? We track the mouse position from
+        <code>SDL_EVENT_MOUSE_MOTION</code> and set a one-frame
+        <code>clicked</code> flag on <code>SDL_EVENT_MOUSE_BUTTON_DOWN</code>.
+    </p>
+<pre><code class="language-cpp">static bool in_rect(float px, float py, const SDL_FRect &amp;r)
+{
+    return px &gt;= r.x &amp;&amp; px &lt; r.x + r.w &amp;&amp; py &gt;= r.y &amp;&amp; py &lt; r.y + r.h;
+}
+
+// Draws the button, returns true if it was clicked this frame.
+static bool button(AppState *st, const SDL_FRect &amp;r, const char *label)
+{
+    bool hot = in_rect(st-&gt;mx, st-&gt;my, r);
+    if (hot) gfx::set_color(st-&gt;renderer, 90, 130, 200, 255);
+    else     gfx::set_color(st-&gt;renderer, 60,  80, 120, 255);
+    gfx::fill_rect(st-&gt;renderer, r.x, r.y, r.w, r.h);
+    draw_text(st-&gt;renderer, label, r.x + 16, r.y + 14, 2.0f);
+    return hot &amp;&amp; st-&gt;clicked;
+}
+</code></pre>
+    <div class="note">
+        <strong>This is "immediate mode".</strong> The button has no stored
+        object — it's drawn and tested in the same call, every frame. It's the
+        simplest UI style there is, and plenty for menus, debug panels and tools.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A title screen with Play and Reset buttons. Playing bumps the score;
+        beating the stored best saves it to the prefs directory, so it survives
+        a restart. Paste <code>glyph_for</code> / <code>draw_glyph</code> /
+        <code>draw_text</code> from recipe 09 where marked.
+    </p>
+<pre><code class="language-cpp">/*
+ * 15-save-load-and-ui.cpp — persistent high score + immediate-mode buttons.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+enum Screen { MENU, PLAYING };
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    Screen screen = MENU;
+    int    score = 0;
+    int    hi_score = 0;
+    float  mx = 0, my = 0;       // cursor position
+    bool   clicked = false;      // true for the frame a click happened
+    char   save_path[1024] = {0};
+};
+
+// ---- bitmap font from recipe 09 (glyph_for / draw_glyph / draw_text) ----
+// Paste those three functions here unchanged; elided for length.
+static void draw_text(SDL_Renderer *r, const char *s, float x, float y, float scale);
+
+static bool in_rect(float px, float py, const SDL_FRect &amp;r)
+{
+    return px &gt;= r.x &amp;&amp; px &lt; r.x + r.w &amp;&amp; py &gt;= r.y &amp;&amp; py &lt; r.y + r.h;
+}
+
+static bool button(AppState *st, const SDL_FRect &amp;r, const char *label)
+{
+    bool hot = in_rect(st-&gt;mx, st-&gt;my, r);
+    gfx::set_color(st-&gt;renderer, hot ? 90 : 60, hot ? 130 : 80, hot ? 200 : 120, 255);
+    gfx::fill_rect(st-&gt;renderer, r.x, r.y, r.w, r.h);
+    draw_text(st-&gt;renderer, label, r.x + 16, r.y + 14, 2.0f);
+    return hot &amp;&amp; st-&gt;clicked;
+}
+
+static void load_score(AppState *st)
+{
+    size_t len = 0;
+    void *data = SDL_LoadFile(st-&gt;save_path, &amp;len);
+    if (data &amp;&amp; len &gt;= sizeof(int)) SDL_memcpy(&amp;st-&gt;hi_score, data, sizeof(int));
+    SDL_free(data);
+}
+
+static void save_score(const char *path, int score)
+{
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) { SDL_Log("save: %s", SDL_GetError()); return; }
+    SDL_WriteIO(io, &amp;score, sizeof(score));
+    SDL_CloseIO(io);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Save/Load & UI", "1.0", "com.example.sdl3.saveui");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Save/Load & UI", 640, 400,
+                                     SDL_WINDOW_RESIZABLE, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    char *base = SDL_GetPrefPath("ExampleCo", "Recipes");
+    SDL_snprintf(st-&gt;save_path, sizeof(st-&gt;save_path), "%ssave.dat", base);
+    SDL_free(base);
+    load_score(st);
+
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    switch (e-&gt;type) {
+    case SDL_EVENT_QUIT: return SDL_APP_SUCCESS;
+    case SDL_EVENT_KEY_DOWN:
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (st-&gt;screen == PLAYING &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_SPACE) {
+            st-&gt;score += 10;
+            if (st-&gt;score &gt; st-&gt;hi_score) { st-&gt;hi_score = st-&gt;score; save_score(st-&gt;save_path, st-&gt;hi_score); }
+        }
+        break;
+    case SDL_EVENT_MOUSE_MOTION:
+        st-&gt;mx = e-&gt;motion.x; st-&gt;my = e-&gt;motion.y;
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        if (e-&gt;button.button == SDL_BUTTON_LEFT) {
+            st-&gt;mx = e-&gt;button.x; st-&gt;my = e-&gt;button.y;
+            st-&gt;clicked = true;
+        }
+        break;
+    default: break;
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    gfx::clear(st-&gt;renderer, 18, 20, 30);
+
+    char buf[64];
+    if (st-&gt;screen == MENU) {
+        draw_text(st-&gt;renderer, "RECIPE 15", 40, 40, 4.0f);
+        SDL_snprintf(buf, sizeof(buf), "BEST %d", st-&gt;hi_score);
+        draw_text(st-&gt;renderer, buf, 40, 110, 2.0f);
+
+        if (button(st, SDL_FRect{ 40, 170, 200, 56 }, "PLAY"))  { st-&gt;screen = PLAYING; st-&gt;score = 0; }
+        if (button(st, SDL_FRect{ 40, 244, 200, 56 }, "RESET")) {
+            st-&gt;hi_score = 0; save_score(st-&gt;save_path, 0);
+        }
+    } else {
+        draw_text(st-&gt;renderer, "SPACE SCORES", 40, 40, 3.0f);
+        SDL_snprintf(buf, sizeof(buf), "SCORE %d", st-&gt;score);
+        draw_text(st-&gt;renderer, buf, 40, 110, 2.0f);
+        SDL_snprintf(buf, sizeof(buf), "BEST %d", st-&gt;hi_score);
+        draw_text(st-&gt;renderer, buf, 40, 150, 2.0f);
+        if (button(st, SDL_FRect{ 40, 220, 200, 56 }, "MENU")) st-&gt;screen = MENU;
+    }
+
+    st-&gt;clicked = false;             // consume the click after the UI saw it
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Store more than a number. Serialise a small struct (name, score, settings) and version it with a leading magic/version field so old saves migrate.</li>
+        <li>Add a keyboard fallback for the menu — arrow keys move a highlight, Enter activates — so the UI works without a mouse.</li>
+        <li>Switch saving to <code>SDL_SaveFile(path, data, size)</code>, the one-call counterpart to <code>SDL_LoadFile</code>, and compare.</li>
+        <li>Make the click "fire on release inside the same button you pressed" instead of on press — the standard, forgiving button behaviour.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="14-music-and-mixing.html">← 14. Music &amp; Mixing</a>
+    <a href="index.html">Index</a>
+    <a href="16-render-targets.html">Next: Render Targets &amp; Screen Effects →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 15
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

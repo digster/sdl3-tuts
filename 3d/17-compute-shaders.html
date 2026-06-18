@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>17 · Compute Shaders — 3D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">3D Track</a> ›
+    <span>17. Compute Shaders</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 17 — Compute Shaders</h1>
+    <p class="tagline">
+        Put the GPU to work on something that isn't drawing. A compute pass
+        steps thousands of particles in parallel, writing straight into the
+        buffer the next render pass draws — no round-trip through the CPU.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>What a compute pipeline is and how it differs from a graphics one.</li>
+        <li>A read-write storage buffer the GPU both simulates into and renders from.</li>
+        <li>The SDL_GPU compute binding order for hand-written MSL (uniforms, then storage buffers).</li>
+        <li>Dispatching threads with <code>SDL_DispatchGPUCompute</code> and choosing a workgroup size.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        The buffer-upload machinery from <a href="03-vertex-buffers.html">recipe
+        03</a>, and the particle <em>concept</em> from the 2D track's
+        <a href="../2d/11-particle-systems.html">recipe 11</a> — except this time
+        the simulation runs entirely on the GPU.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Compute is just "run this function N times"</h3>
+    <p>
+        A graphics pipeline is wired for triangles: vertex shader, rasteriser,
+        fragment shader. A <strong>compute</strong> pipeline throws all that away
+        — it's one kernel function you launch across a grid of threads, each
+        identified by <code>thread_position_in_grid</code>. Perfect for anything
+        data-parallel: physics, image filters, culling, simulation.
+    </p>
+<pre><code class="language-cpp">SDL_GPUComputePipelineCreateInfo ci{};
+ci.code = (const Uint8*)kCompute; ci.code_size = SDL_strlen(kCompute);
+ci.entrypoint = "cs"; ci.format = SDL_GPU_SHADERFORMAT_MSL;
+ci.num_uniform_buffers          = 1;   // dt + seed + count
+ci.num_readwrite_storage_buffers = 1;  // the particles
+ci.threadcount_x = 64; ci.threadcount_y = 1; ci.threadcount_z = 1;
+st-&gt;compute = SDL_CreateGPUComputePipeline(st-&gt;device, &amp;ci);
+</code></pre>
+
+    <h3>One buffer, two roles</h3>
+    <p>
+        The particles live in a single GPU buffer created with three usage
+        flags: <code>VERTEX</code> so the render pass can draw it, plus
+        <code>COMPUTE_STORAGE_READ</code> / <code>WRITE</code> so the kernel can
+        read and update it in place. SDL inserts the barrier between the compute
+        pass and the render pass for you — the data never leaves the GPU.
+    </p>
+<pre><code class="language-cpp">SDL_GPUBufferCreateInfo bi{};
+bi.usage = SDL_GPU_BUFFERUSAGE_VERTEX
+         | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ
+         | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
+bi.size  = sizeof(Particle) * N;
+st-&gt;particles = SDL_CreateGPUBuffer(st-&gt;device, &amp;bi);
+</code></pre>
+
+    <h3>The kernel — mind the binding order</h3>
+    <p>
+        SDL_GPU binds compute resources to MSL <code>[[buffer(n)]]</code> slots
+        in a fixed order: <strong>uniform buffers first, then read-only storage,
+        then read-write storage</strong>. With one uniform and one read-write
+        buffer, that's <code>buffer(0)</code> for the params and
+        <code>buffer(1)</code> for the particles.
+    </p>
+<pre><code class="language-cpp">static const char *kCompute = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct Particle { float2 pos; float2 vel; };
+struct Params   { float dt; float seed; uint count; float pad; };
+
+static float hash(float n) { return fract(sin(n) * 43758.5453); }
+
+kernel void cs(constant Params &amp;u   [[buffer(0)]],   // uniforms first
+               device Particle *p   [[buffer(1)]],   // then read-write storage
+               uint id [[thread_position_in_grid]]) {
+    if (id &gt;= u.count) return;
+    Particle q = p[id];
+    q.vel.y -= 0.8 * u.dt;                 // gravity
+    q.pos   += q.vel * u.dt;
+    if (q.pos.y &lt; -1.0) {                   // fell off the bottom → respawn at top
+        float r = hash(float(id) + u.seed);
+        q.pos = float2(r * 2.0 - 1.0, 1.0);
+        q.vel = float2((hash(r) - 0.5) * 0.6, -0.2 - hash(r + 1.0) * 0.6);
+    }
+    p[id] = q;
+}
+)msl";
+</code></pre>
+
+    <h3>Dispatch, then draw</h3>
+    <p>
+        A compute pass binds the read-write buffer, pushes the per-frame
+        uniforms, and dispatches enough workgroups to cover every particle —
+        <code>ceil(N / 64)</code> groups of 64 threads. The very next pass draws
+        the same buffer as a point list.
+    </p>
+<pre><code class="language-cpp">SDL_GPUStorageBufferReadWriteBinding rw{}; rw.buffer = st-&gt;particles;
+SDL_GPUComputePass *cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &amp;rw, 1);
+SDL_BindGPUComputePipeline(cp, st-&gt;compute);
+SDL_PushGPUComputeUniformData(cmd, 0, &amp;params, sizeof(params));
+SDL_DispatchGPUCompute(cp, (N + 63) / 64, 1, 1);
+SDL_EndGPUComputePass(cp);
+</code></pre>
+
+    <div class="note">
+        <strong>Why this is fast.</strong> 50 000 particles is 50 000
+        independent threads the GPU runs in lockstep. The data is born, updated
+        and consumed without ever crossing the PCIe bus — the pattern behind GPU
+        particle systems, cloth, boids and fluid sims.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A fountain of points simulated entirely on the GPU: gravity pulls them
+        down, and each one respawns at the top when it falls off-screen. The CPU
+        only ever ticks the clock.
+    </p>
+<pre><code class="language-cpp">/*
+ * 17-compute-shaders.cpp — GPU particle sim: compute pass updates a buffer the
+ * render pass then draws as points.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;cstring&gt;
+#include &lt;cstddef&gt;
+#include &lt;vector&gt;
+
+static const int N = 50000;
+
+struct Particle { float px, py, vx, vy; };
+
+static const char *kCompute = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct Particle { float2 pos; float2 vel; };
+struct Params   { float dt; float seed; uint count; float pad; };
+static float hash(float n) { return fract(sin(n) * 43758.5453); }
+kernel void cs(constant Params &amp;u [[buffer(0)]], device Particle *p [[buffer(1)]],
+               uint id [[thread_position_in_grid]]) {
+    if (id &gt;= u.count) return;
+    Particle q = p[id];
+    q.vel.y -= 0.8 * u.dt;
+    q.pos   += q.vel * u.dt;
+    if (q.pos.y &lt; -1.0) {
+        float r = hash(float(id) + u.seed);
+        q.pos = float2(r * 2.0 - 1.0, 1.0);
+        q.vel = float2((hash(r) - 0.5) * 0.6, -0.2 - hash(r + 1.0) * 0.6);
+    }
+    p[id] = q;
+}
+)msl";
+
+static const char *kVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSIn  { float2 pos [[attribute(0)]]; float2 vel [[attribute(1)]]; };
+struct VSOut { float4 position [[position]]; float point_size [[point_size]]; float4 color; };
+vertex VSOut vs(VSIn in [[stage_in]]) {
+    VSOut o; o.position = float4(in.pos, 0, 1); o.point_size = 2.0;
+    float sp = length(in.vel);
+    o.color = float4(0.4 + sp, 0.7, 1.0 - sp, 1.0);
+    return o;
+}
+)msl";
+static const char *kFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float point_size [[point_size]]; float4 color; };
+fragment float4 fs(VSOut in [[stage_in]]) { return in.color; }
+)msl";
+
+struct AppState {
+    SDL_Window *window=nullptr; SDL_GPUDevice *device=nullptr;
+    SDL_GPUComputePipeline *compute=nullptr;
+    SDL_GPUGraphicsPipeline *draw=nullptr;
+    SDL_GPUBuffer *particles=nullptr;
+    Uint64 last_ns=0;
+};
+
+static SDL_AppResult fail(const char *w){ SDL_Log("%s: %s", w, SDL_GetError()); return SDL_APP_FAILURE; }
+static SDL_GPUShader *make_shader(SDL_GPUDevice *d, const char *src, SDL_GPUShaderStage s, const char *e){
+    SDL_GPUShaderCreateInfo i{}; i.code=(const Uint8*)src; i.code_size=std::strlen(src);
+    i.entrypoint=e; i.format=SDL_GPU_SHADERFORMAT_MSL; i.stage=s;
+    return SDL_CreateGPUShader(d,&amp;i);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Compute Shaders", "1.0", "com.example.sdl3.compute");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, true, nullptr);
+    st-&gt;window = SDL_CreateWindow("Compute Shaders", 800, 600, SDL_WINDOW_RESIZABLE);
+    SDL_ClaimWindowForGPUDevice(st-&gt;device, st-&gt;window);
+
+    // Particle buffer: drawn as vertices AND simulated as compute storage.
+    SDL_GPUBufferCreateInfo bi{};
+    bi.usage = SDL_GPU_BUFFERUSAGE_VERTEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
+    bi.size  = sizeof(Particle) * N;
+    st-&gt;particles = SDL_CreateGPUBuffer(st-&gt;device, &amp;bi);
+
+    // Seed initial state and upload it.
+    std::vector&lt;Particle&gt; init(N);
+    for (int i = 0; i &lt; N; ++i) {
+        init[i].px = SDL_randf() * 2 - 1;
+        init[i].py = SDL_randf() * 2 - 1;
+        init[i].vx = (SDL_randf() - 0.5f) * 0.6f;
+        init[i].vy = -0.2f - SDL_randf() * 0.6f;
+    }
+    {
+        SDL_GPUTransferBufferCreateInfo tbi{}; tbi.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD; tbi.size=bi.size;
+        SDL_GPUTransferBuffer *tb=SDL_CreateGPUTransferBuffer(st-&gt;device,&amp;tbi);
+        void *m=SDL_MapGPUTransferBuffer(st-&gt;device,tb,false); std::memcpy(m,init.data(),bi.size); SDL_UnmapGPUTransferBuffer(st-&gt;device,tb);
+        SDL_GPUCommandBuffer *cmd=SDL_AcquireGPUCommandBuffer(st-&gt;device); SDL_GPUCopyPass *cp=SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTransferBufferLocation s{}; s.transfer_buffer=tb; SDL_GPUBufferRegion r{}; r.buffer=st-&gt;particles; r.size=(Uint32)bi.size;
+        SDL_UploadToGPUBuffer(cp,&amp;s,&amp;r,false); SDL_EndGPUCopyPass(cp); SDL_SubmitGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(st-&gt;device,tb);
+    }
+
+    // Compute pipeline.
+    SDL_GPUComputePipelineCreateInfo ci{};
+    ci.code=(const Uint8*)kCompute; ci.code_size=std::strlen(kCompute);
+    ci.entrypoint="cs"; ci.format=SDL_GPU_SHADERFORMAT_MSL;
+    ci.num_uniform_buffers=1; ci.num_readwrite_storage_buffers=1;
+    ci.threadcount_x=64; ci.threadcount_y=1; ci.threadcount_z=1;
+    st-&gt;compute = SDL_CreateGPUComputePipeline(st-&gt;device, &amp;ci);
+    if (!st-&gt;compute) return fail("compute pipeline");
+
+    // Graphics pipeline: draw the buffer as points.
+    SDL_GPUShader *vs=make_shader(st-&gt;device,kVS,SDL_GPU_SHADERSTAGE_VERTEX,"vs");
+    SDL_GPUShader *fs=make_shader(st-&gt;device,kFS,SDL_GPU_SHADERSTAGE_FRAGMENT,"fs");
+    SDL_GPUVertexBufferDescription vb{}; vb.slot=0; vb.pitch=sizeof(Particle); vb.input_rate=SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    SDL_GPUVertexAttribute a[2]{};
+    a[0]={0,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Particle,px)};
+    a[1]={1,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Particle,vx)};
+    SDL_GPUVertexInputState vi{}; vi.vertex_buffer_descriptions=&amp;vb; vi.num_vertex_buffers=1; vi.vertex_attributes=a; vi.num_vertex_attributes=2;
+    SDL_GPUColorTargetDescription ct{}; ct.format=SDL_GetGPUSwapchainTextureFormat(st-&gt;device, st-&gt;window);
+    SDL_GPUGraphicsPipelineCreateInfo pc{};
+    pc.vertex_shader=vs; pc.fragment_shader=fs; pc.primitive_type=SDL_GPU_PRIMITIVETYPE_POINTLIST; pc.vertex_input_state=vi;
+    pc.target_info.color_target_descriptions=&amp;ct; pc.target_info.num_color_targets=1;
+    st-&gt;draw=SDL_CreateGPUGraphicsPipeline(st-&gt;device,&amp;pc);
+    SDL_ReleaseGPUShader(st-&gt;device,vs); SDL_ReleaseGPUShader(st-&gt;device,fs);
+    if(!st-&gt;draw) return fail("draw pipeline");
+
+    st-&gt;last_ns=SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    if (dt &gt; 0.05f) dt = 0.05f;               // clamp after a stall
+    st-&gt;last_ns = now;
+
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(st-&gt;device);
+
+    struct { float dt, seed; Uint32 count, pad; } params{ dt, (float)(now & 0xffff) * 0.001f, (Uint32)N, 0 };
+
+    // ---- compute pass: advance the simulation ----
+    SDL_GPUStorageBufferReadWriteBinding rw{}; rw.buffer = st-&gt;particles;
+    SDL_GPUComputePass *cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &amp;rw, 1);
+    SDL_BindGPUComputePipeline(cp, st-&gt;compute);
+    SDL_PushGPUComputeUniformData(cmd, 0, &amp;params, sizeof(params));
+    SDL_DispatchGPUCompute(cp, (N + 63) / 64, 1, 1);
+    SDL_EndGPUComputePass(cp);
+
+    // ---- render pass: draw the same buffer ----
+    SDL_GPUTexture *swap=nullptr; Uint32 sw=0, sh=0;
+    SDL_WaitAndAcquireGPUSwapchainTexture(cmd, st-&gt;window, &amp;swap, &amp;sw, &amp;sh);
+    if (swap) {
+        SDL_GPUColorTargetInfo c{}; c.texture=swap; c.clear_color=SDL_FColor{0.02f,0.02f,0.05f,1};
+        c.load_op=SDL_GPU_LOADOP_CLEAR; c.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *p = SDL_BeginGPURenderPass(cmd, &amp;c, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(p, st-&gt;draw);
+        SDL_GPUBufferBinding vb{}; vb.buffer=st-&gt;particles; SDL_BindGPUVertexBuffers(p,0,&amp;vb,1);
+        SDL_DrawGPUPrimitives(p, N, 1, 0, 0);
+        SDL_EndGPURenderPass(p);
+    }
+
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (st-&gt;device) {
+        if (st-&gt;particles) SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;particles);
+        if (st-&gt;draw)      SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;draw);
+        if (st-&gt;compute)   SDL_ReleaseGPUComputePipeline(st-&gt;device, st-&gt;compute);
+        if (st-&gt;window) SDL_ReleaseWindowFromGPUDevice(st-&gt;device, st-&gt;window);
+        SDL_DestroyGPUDevice(st-&gt;device);
+    }
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Add mouse attraction: push the cursor position in as a uniform and steer each particle's velocity toward it. Instant gravity well.</li>
+        <li>Bump <code>N</code> to 500 000. The CPU side doesn't change — only the dispatch count — and the GPU shrugs.</li>
+        <li>Write a second read-write buffer of colours the compute pass evolves over a particle's life, and read it in the vertex shader.</li>
+        <li>Replace gravity with a curl-noise field for swirling, fluid-like motion.</li>
+    </ol>
+    <p>
+        That closes the 3D track: from <a href="01-hello-triangle.html">one
+        triangle</a> through lighting, shadows and cross-platform shaders to the
+        GPU simulating its own geometry.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="16-shadow-mapping.html">← 16. Shadow Mapping</a>
+    <a href="index.html">Index</a>
+    <a href="../bgfx/index.html">bgfx Track →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">3D Track</a> · Recipe 17
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

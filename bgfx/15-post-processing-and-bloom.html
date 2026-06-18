@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>15 · Post-Processing &amp; Bloom — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>15. Post-Processing &amp; Bloom</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 15 — Post-Processing &amp; Bloom</h1>
+    <p class="tagline">
+        Make bright things glow. Render the scene to a float framebuffer, extract
+        the bright pixels, blur them, and add the result back — a five-view
+        pipeline that's the template for every screen-space effect.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Chaining multiple bgfx <em>views</em>, each writing into the next one's input framebuffer.</li>
+        <li>An HDR (<code>RGBA16F</code>) scene target so bright values survive past 1.0.</li>
+        <li>The bloom recipe: bright-pass → separable Gaussian blur → additive composite + tonemap.</li>
+        <li>A fullscreen-triangle pass driven by a transient vertex buffer.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="10-views-and-render-to-texture.html">Recipe 10</a> for views and
+        <code>createFrameBuffer</code>, and <a href="04-shaders-with-shaderc.html">recipe
+        04</a> for the <code>shaderc</code> workflow — this recipe adds four small
+        post shaders.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Views as a pipeline</h3>
+    <p>
+        Recipe 10 used a second view to render into a texture. Bloom just keeps
+        going: each stage is a view that reads the previous stage's framebuffer
+        and writes its own. bgfx submits views in order of their id, so the
+        chain runs front to back:
+    </p>
+    <pre><code>view 0  scene      → fb_scene  (HDR colour + depth)
+view 1  bright     → fb_bright (keep only luminous pixels)
+view 2  blur X     → fb_blurA
+view 3  blur Y     → fb_blurB
+view 4  combine    → backbuffer (scene + blurred bloom, tonemapped)</code></pre>
+
+    <h3>An HDR scene target</h3>
+    <p>
+        The bright-pass needs values that can exceed 1.0, so the scene target is
+        <code>RGBA16F</code>, not <code>RGBA8</code>. We build it from two
+        textures — a float colour and a depth — and hand both to
+        <code>createFrameBuffer</code> so the cube still depth-tests.
+    </p>
+<pre><code class="language-cpp">uint64_t rt = BGFX_TEXTURE_RT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+bgfx::TextureHandle th[2] = {
+    bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::RGBA16F, rt),
+    bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY),
+};
+st-&gt;fbScene = bgfx::createFrameBuffer(2, th, /*destroyTextures=*/true);
+</code></pre>
+
+    <h3>The four post shaders</h3>
+    <p>
+        Each post stage is the same fullscreen triangle through different
+        fragment shaders. Author these <code>.sc</code> files and compile them
+        with <code>shaderc</code> (recipe 04) into
+        <code>examples/cpp-bgfx/shaders/</code>.
+    </p>
+<pre><code># vs_fullscreen.sc — clip-space triangle, pass the UV straight through
+$input  a_position, a_texcoord0
+$output v_texcoord0
+#include "bgfx_shader.sh"
+void main() { gl_Position = vec4(a_position.xy, 0.0, 1.0); v_texcoord0 = a_texcoord0; }
+</code></pre>
+<pre><code># fs_brightpass.sc — keep only pixels brighter than a threshold
+$input v_texcoord0
+#include "bgfx_shader.sh"
+SAMPLER2D(s_tex, 0);
+void main() {
+    vec3 c = texture2D(s_tex, v_texcoord0).rgb;
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    gl_FragColor = vec4(c * step(0.6, l), 1.0);
+}
+</code></pre>
+<pre><code># fs_blur.sc — one axis of a 5-tap Gaussian; u_blurDir picks the axis
+$input v_texcoord0
+#include "bgfx_shader.sh"
+SAMPLER2D(s_tex, 0);
+uniform vec4 u_blurDir;        // xy = texel-sized step along one axis
+void main() {
+    vec2 d = u_blurDir.xy;
+    vec3 c  = texture2D(s_tex, v_texcoord0).rgb            * 0.227;
+    c += texture2D(s_tex, v_texcoord0 + d).rgb             * 0.316;
+    c += texture2D(s_tex, v_texcoord0 - d).rgb             * 0.316;
+    c += texture2D(s_tex, v_texcoord0 + d * 2.0).rgb       * 0.070;
+    c += texture2D(s_tex, v_texcoord0 - d * 2.0).rgb       * 0.070;
+    gl_FragColor = vec4(c, 1.0);
+}
+</code></pre>
+<pre><code># fs_combine.sc — scene + bloom, then a Reinhard tonemap back to [0,1]
+$input v_texcoord0
+#include "bgfx_shader.sh"
+SAMPLER2D(s_scene, 0);
+SAMPLER2D(s_bloom, 1);
+uniform vec4 u_intensity;
+void main() {
+    vec3 c = texture2D(s_scene, v_texcoord0).rgb;
+    c += texture2D(s_bloom, v_texcoord0).rgb * u_intensity.x;
+    c = c / (c + vec3_splat(1.0));
+    gl_FragColor = vec4(c, 1.0);
+}
+</code></pre>
+    <div class="note">
+        <strong>Separable blur.</strong> A 2D Gaussian factors into a horizontal
+        pass then a vertical one — two cheap 1D blurs instead of one expensive 2D
+        kernel. That's why bloom uses two blur views, not one.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A spinning cube whose bright corners bloom. The whole effect is the
+        five-view chain in <code>SDL_AppIterate</code>; everything else is the
+        framebuffer and uniform setup you already know from recipe 10.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/15-post-processing-and-bloom.cpp — scene → bright → blur×2 → combine.
+ * Shaders: vs_cubes/fs_cubes, vs_fullscreen + fs_brightpass/fs_blur/fs_combine.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+
+struct PosColorVertex { float x, y, z; uint32_t abgr; };
+static PosColorVertex kCube[8] = {
+    {-1, 1, 1, 0xff00ffff},{ 1, 1, 1, 0xffffffff},{-1,-1, 1, 0xff0000ff},{ 1,-1, 1, 0xffff00ff},
+    {-1, 1,-1, 0xffffff00},{ 1, 1,-1, 0xffffffff},{-1,-1,-1, 0xff00ff00},{ 1,-1,-1, 0xffff8000},
+};
+static const uint16_t kCubeIdx[36] = {
+    0,1,2, 1,3,2, 4,6,5, 5,6,7, 0,2,4, 4,2,6, 1,5,3, 5,7,3, 0,4,1, 4,5,1, 2,3,6, 6,3,7,
+};
+struct PosUvVertex { float x, y, u, v; };
+
+struct AppState {
+    SDL_Window *window = nullptr;
+    int width = 1280, height = 720;
+    bgfx::VertexLayout cubeLayout, quadLayout;
+    bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
+    bgfx::IndexBufferHandle  ibh = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle scene, bright, blur, combine;
+    bgfx::FrameBufferHandle fbScene, fbBright, fbBlurA, fbBlurB;
+    bgfx::UniformHandle s_tex, s_scene, s_bloom, u_blurDir, u_intensity;
+    Uint64 startNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+static bgfx::FrameBufferHandle colorFB(int w, int h) {
+    uint64_t rt = BGFX_TEXTURE_RT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+    return bgfx::createFrameBuffer((uint16_t)w, (uint16_t)h, bgfx::TextureFormat::RGBA16F, rt);
+}
+
+static void make_targets(AppState *st, int w, int h)
+{
+    if (bgfx::isValid(st-&gt;fbScene)) {
+        bgfx::destroy(st-&gt;fbScene); bgfx::destroy(st-&gt;fbBright);
+        bgfx::destroy(st-&gt;fbBlurA); bgfx::destroy(st-&gt;fbBlurB);
+    }
+    uint64_t rt = BGFX_TEXTURE_RT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+    bgfx::TextureHandle th[2] = {
+        bgfx::createTexture2D((uint16_t)w,(uint16_t)h,false,1,bgfx::TextureFormat::RGBA16F, rt),
+        bgfx::createTexture2D((uint16_t)w,(uint16_t)h,false,1,bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY),
+    };
+    st-&gt;fbScene  = bgfx::createFrameBuffer(2, th, true);
+    st-&gt;fbBright = colorFB(w, h);
+    st-&gt;fbBlurA  = colorFB(w, h);
+    st-&gt;fbBlurB  = colorFB(w, h);
+}
+
+// Allocate + bind a clip-space fullscreen triangle for the next submit.
+static void screenTri(AppState *st)
+{
+    if (bgfx::getAvailTransientVertexBuffer(3, st-&gt;quadLayout) != 3) return;
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::allocTransientVertexBuffer(&amp;tvb, 3, st-&gt;quadLayout);
+    PosUvVertex *v = (PosUvVertex *)tvb.data;
+    // Flip V on top-left-origin backends (Metal/D3D) so the composite isn't upside-down.
+    bool flip = !bgfx::getCaps()-&gt;originBottomLeft;
+    float vb = flip ? 1.0f : 0.0f;   // V at the screen's bottom (clip y = -1)
+    float vt = flip ? -1.0f : 2.0f;  // V at the top    (clip y = 3)
+    v[0] = { -1.0f, -1.0f, 0.0f, vb };
+    v[1] = {  3.0f, -1.0f, 2.0f, vb };
+    v[2] = { -1.0f,  3.0f, 0.0f, vt };
+    bgfx::setVertexBuffer(0, &amp;tvb);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Bloom", "1.0", "com.example.sdl3.bgfx.bloom");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Post-Processing & Bloom", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type              = bgfx::RendererType::Count;
+    init.platformData.nwh  = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt  = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width  = (uint32_t)st-&gt;width;
+    init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset  = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+
+    st-&gt;cubeLayout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0,   4, bgfx::AttribType::Uint8, true).end();
+    st-&gt;quadLayout.begin()
+        .add(bgfx::Attrib::Position,  2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float).end();
+
+    st-&gt;vbh = bgfx::createVertexBuffer(bgfx::makeRef(kCube, sizeof(kCube)), st-&gt;cubeLayout);
+    st-&gt;ibh = bgfx::createIndexBuffer (bgfx::makeRef(kCubeIdx, sizeof(kCubeIdx)));
+
+    st-&gt;scene   = loadProgram("vs_cubes",      "fs_cubes");
+    st-&gt;bright  = loadProgram("vs_fullscreen", "fs_brightpass");
+    st-&gt;blur    = loadProgram("vs_fullscreen", "fs_blur");
+    st-&gt;combine = loadProgram("vs_fullscreen", "fs_combine");
+    if (!bgfx::isValid(st-&gt;combine)) return fail("loadProgram");
+
+    st-&gt;s_tex       = bgfx::createUniform("s_tex",      bgfx::UniformType::Sampler);
+    st-&gt;s_scene     = bgfx::createUniform("s_scene",    bgfx::UniformType::Sampler);
+    st-&gt;s_bloom     = bgfx::createUniform("s_bloom",    bgfx::UniformType::Sampler);
+    st-&gt;u_blurDir   = bgfx::createUniform("u_blurDir",  bgfx::UniformType::Vec4);
+    st-&gt;u_intensity = bgfx::createUniform("u_intensity",bgfx::UniformType::Vec4);
+
+    make_targets(st, st-&gt;width, st-&gt;height);
+    st-&gt;startNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+        make_targets(st, st-&gt;width, st-&gt;height);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (float)(SDL_GetTicksNS() - st-&gt;startNs) / 1.0e9f;
+    uint16_t w = (uint16_t)st-&gt;width, h = (uint16_t)st-&gt;height;
+    const uint64_t fsState = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A;
+
+    // --- view 0: scene → fbScene ---
+    bgfx::setViewFrameBuffer(0, st-&gt;fbScene);
+    bgfx::setViewRect(0, 0, 0, w, h);
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x05060aff, 1.0f, 0);
+    const bx::Vec3 at = { 0, 0, 0 }, eye = { 0, 0, -5 };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 60.0f, float(w)/float(h), 0.1f, 100.0f, bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(0, view, proj);
+    float mtx[16]; bx::mtxRotateXY(mtx, t * 0.6f, t * 0.8f);
+    bgfx::setTransform(mtx);
+    bgfx::setVertexBuffer(0, st-&gt;vbh);
+    bgfx::setIndexBuffer(st-&gt;ibh);
+    bgfx::setState(BGFX_STATE_DEFAULT);
+    bgfx::submit(0, st-&gt;scene);
+
+    // --- view 1: bright-pass fbScene → fbBright ---
+    bgfx::setViewFrameBuffer(1, st-&gt;fbBright);
+    bgfx::setViewRect(1, 0, 0, w, h);
+    bgfx::setTexture(0, st-&gt;s_tex, bgfx::getTexture(st-&gt;fbScene));
+    screenTri(st); bgfx::setState(fsState); bgfx::submit(1, st-&gt;bright);
+
+    // --- view 2: blur X fbBright → fbBlurA ---
+    float dx[4] = { 1.0f / w, 0.0f, 0.0f, 0.0f };
+    bgfx::setViewFrameBuffer(2, st-&gt;fbBlurA);
+    bgfx::setViewRect(2, 0, 0, w, h);
+    bgfx::setUniform(st-&gt;u_blurDir, dx);
+    bgfx::setTexture(0, st-&gt;s_tex, bgfx::getTexture(st-&gt;fbBright));
+    screenTri(st); bgfx::setState(fsState); bgfx::submit(2, st-&gt;blur);
+
+    // --- view 3: blur Y fbBlurA → fbBlurB ---
+    float dy[4] = { 0.0f, 1.0f / h, 0.0f, 0.0f };
+    bgfx::setViewFrameBuffer(3, st-&gt;fbBlurB);
+    bgfx::setViewRect(3, 0, 0, w, h);
+    bgfx::setUniform(st-&gt;u_blurDir, dy);
+    bgfx::setTexture(0, st-&gt;s_tex, bgfx::getTexture(st-&gt;fbBlurA));
+    screenTri(st); bgfx::setState(fsState); bgfx::submit(3, st-&gt;blur);
+
+    // --- view 4: combine → backbuffer ---
+    float intensity[4] = { 1.4f, 0, 0, 0 };
+    bgfx::setViewFrameBuffer(4, BGFX_INVALID_HANDLE);
+    bgfx::setViewRect(4, 0, 0, w, h);
+    bgfx::setUniform(st-&gt;u_intensity, intensity);
+    bgfx::setTexture(0, st-&gt;s_scene, bgfx::getTexture(st-&gt;fbScene));
+    bgfx::setTexture(1, st-&gt;s_bloom, bgfx::getTexture(st-&gt;fbBlurB));
+    screenTri(st); bgfx::setState(fsState); bgfx::submit(4, st-&gt;combine);
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (bgfx::isValid(st-&gt;fbScene)) {
+        bgfx::destroy(st-&gt;fbScene); bgfx::destroy(st-&gt;fbBright);
+        bgfx::destroy(st-&gt;fbBlurA); bgfx::destroy(st-&gt;fbBlurB);
+    }
+    bgfx::destroy(st-&gt;s_tex); bgfx::destroy(st-&gt;s_scene); bgfx::destroy(st-&gt;s_bloom);
+    bgfx::destroy(st-&gt;u_blurDir); bgfx::destroy(st-&gt;u_intensity);
+    bgfx::destroy(st-&gt;scene); bgfx::destroy(st-&gt;bright); bgfx::destroy(st-&gt;blur); bgfx::destroy(st-&gt;combine);
+    if (bgfx::isValid(st-&gt;ibh)) bgfx::destroy(st-&gt;ibh);
+    if (bgfx::isValid(st-&gt;vbh)) bgfx::destroy(st-&gt;vbh);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Run the blur framebuffers at half resolution. The blur gets wider and cheaper, and bloom barely looks different — the standard optimisation.</li>
+        <li>Animate <code>u_intensity</code> and the bright-pass threshold from the keyboard to feel how each shapes the glow.</li>
+        <li>Chain the blur twice (six views) for a softer, wider halo.</li>
+        <li>Insert a tonemap-only path (skip bloom) and toggle between them — a clean A/B of what bloom actually adds.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="14-mouse-picking.html">← Prev: Mouse Picking</a>
+    <a href="index.html">Index</a>
+    <a href="16-compute-shaders.html">Next: Compute Shaders →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 15
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

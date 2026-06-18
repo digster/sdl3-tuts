@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>15 · Normal Mapping — 3D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">3D Track</a> ›
+    <span>15. Normal Mapping</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 15 — Normal Mapping</h1>
+    <p class="tagline">
+        Fake surface detail no geometry has. A normal map perturbs the lighting
+        normal per pixel, so a flat quad ripples and dimples under a moving
+        light — the trick behind every brick wall in games.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Why a texture of <em>normals</em> buys you bumps that real geometry would cost thousands of triangles.</li>
+        <li>Tangent space, and the TBN matrix that gets a texel normal into world space.</li>
+        <li>Adding a tangent vertex attribute alongside position, normal and UV.</li>
+        <li>Decoding a normal map (<code>texel * 2 − 1</code>) and lighting with the result.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="08-textures-and-samplers.html">Recipe 08</a> for sampling and
+        <a href="09-phong-lighting.html">recipe 09</a> for the diffuse lighting
+        we perturb. We light a single quad to keep the focus on the normals.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>What a normal map stores</h3>
+    <p>
+        An ordinary texture stores colour. A <strong>normal map</strong> stores
+        a unit normal per texel, packed into RGB: a vector component in
+        <code>[−1, 1]</code> becomes a colour channel in <code>[0, 1]</code> via
+        <code>c = n*0.5 + 0.5</code>. That's why normal maps look lilac — a
+        flat-facing normal <code>(0,0,1)</code> encodes to
+        <code>(0.5, 0.5, 1.0)</code>. At lighting time you decode it back with
+        <code>n = texel*2 − 1</code>.
+    </p>
+
+    <h3>Tangent space and TBN</h3>
+    <p>
+        The catch: the stored normals are relative to the <em>surface</em>, not
+        the world. To use one you need a basis that maps "surface space" to world
+        space — the <strong>TBN matrix</strong>, built from the surface
+        <strong>T</strong>angent, <strong>B</strong>itangent and
+        <strong>N</strong>ormal. We pass T and N as vertex attributes and derive
+        B in the shader.
+    </p>
+<pre><code class="language-cpp">struct Vertex { float px,py,pz;  float nx,ny,nz;  float tx,ty,tz;  float u,v; };
+// For our quad in the XY plane: normal = +Z, tangent = +X.
+</code></pre>
+
+    <h3>The fragment shader</h3>
+    <p>
+        Sample the map, decode, build TBN from the interpolated tangent and
+        normal, rotate the texel normal into world space, then do the usual
+        diffuse dot product against the light direction.
+    </p>
+<pre><code class="language-cpp">static const char *kFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float3 wn; float3 wt; float2 uv; };
+struct LBO   { float3 lightDir; };
+fragment float4 fs(VSOut in [[stage_in]],
+                   constant LBO &amp;L [[buffer(0)]],
+                   texture2d&lt;float&gt; nmap [[texture(0)]], sampler smp [[sampler(0)]]) {
+    float3 N = normalize(in.wn);
+    float3 T = normalize(in.wt - N * dot(N, in.wt));   // Gram-Schmidt
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+
+    float3 sampled = nmap.sample(smp, in.uv).xyz * 2.0 - 1.0;   // decode
+    float3 n = normalize(TBN * sampled);                        // into world space
+
+    float diff = max(dot(n, normalize(-L.lightDir)), 0.0);
+    float3 base = float3(0.7, 0.7, 0.8);
+    return float4(base * (0.15 + 0.85 * diff), 1.0);
+}
+)msl";
+</code></pre>
+    <div class="note">
+        <strong>The Gram-Schmidt line</strong> re-orthogonalises T against N so
+        the basis stays square after interpolation smears the attributes. Skip
+        it and lighting skews where the surface curves.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A flat quad with a procedurally generated "egg-carton" normal map,
+        rotating under an orbiting light. The quad never changes shape — only
+        the per-pixel normals do — yet it reads as bumpy.
+    </p>
+<pre><code class="language-cpp">/*
+ * 15-normal-mapping.cpp — tangent-space normal mapping on a single quad.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;cstring&gt;
+#include &lt;cstddef&gt;
+
+static const int NMAP = 128;
+
+struct Vertex { float px,py,pz, nx,ny,nz, tx,ty,tz, u,v; };
+// Quad in XY, facing +Z. Normal +Z, tangent +X.
+static const Vertex kQuad[4] = {
+    { -1,-1,0,  0,0,1,  1,0,0,  0,0 },
+    {  1,-1,0,  0,0,1,  1,0,0,  1,0 },
+    {  1, 1,0,  0,0,1,  1,0,0,  1,1 },
+    { -1, 1,0,  0,0,1,  1,0,0,  0,1 },
+};
+static const Uint16 kIdx[6] = { 0,1,2, 0,2,3 };
+
+struct Mat4 { float m[16]; };
+static Mat4 mat4_identity(){ Mat4 r{}; r.m[0]=r.m[5]=r.m[10]=r.m[15]=1; return r; }
+static Mat4 mat4_translate(float x,float y,float z){ Mat4 r=mat4_identity(); r.m[12]=x;r.m[13]=y;r.m[14]=z; return r;}
+static Mat4 mat4_rotate_y(float a){ float c=SDL_cosf(a),s=SDL_sinf(a); Mat4 r=mat4_identity(); r.m[0]=c;r.m[2]=-s;r.m[8]=s;r.m[10]=c; return r;}
+static Mat4 mat4_perspective(float fovy,float aspect,float n,float f){ float t=1/SDL_tanf(fovy*0.5f); Mat4 r{}; r.m[0]=t/aspect; r.m[5]=t; r.m[10]=f/(n-f); r.m[11]=-1; r.m[14]=(n*f)/(n-f); return r;}
+static Mat4 mat4_mul(const Mat4 &amp;a,const Mat4 &amp;b){ Mat4 r{}; for(int c=0;c&lt;4;++c) for(int row=0;row&lt;4;++row){ float s=0; for(int k=0;k&lt;4;++k) s+=a.m[k*4+row]*b.m[c*4+k]; r.m[c*4+row]=s; } return r;}
+
+static const char *kVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSIn  { float3 pos [[attribute(0)]]; float3 nrm [[attribute(1)]]; float3 tan [[attribute(2)]]; float2 uv [[attribute(3)]]; };
+struct VSOut { float4 position [[position]]; float3 wn; float3 wt; float2 uv; };
+struct UBO   { float4x4 mvp; float4x4 model; };
+vertex VSOut vs(VSIn in [[stage_in]], constant UBO &amp;u [[buffer(0)]]) {
+    VSOut o;
+    o.position = u.mvp * float4(in.pos, 1.0);
+    o.wn = (u.model * float4(in.nrm, 0.0)).xyz;
+    o.wt = (u.model * float4(in.tan, 0.0)).xyz;
+    o.uv = in.uv;
+    return o;
+}
+)msl";
+static const char *kFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float3 wn; float3 wt; float2 uv; };
+struct LBO   { float3 lightDir; };
+fragment float4 fs(VSOut in [[stage_in]], constant LBO &amp;L [[buffer(0)]],
+                   texture2d&lt;float&gt; nmap [[texture(0)]], sampler smp [[sampler(0)]]) {
+    float3 N = normalize(in.wn);
+    float3 T = normalize(in.wt - N * dot(N, in.wt));
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+    float3 sampled = nmap.sample(smp, in.uv).xyz * 2.0 - 1.0;
+    float3 n = normalize(TBN * sampled);
+    float diff = max(dot(n, normalize(-L.lightDir)), 0.0);
+    float3 base = float3(0.7, 0.7, 0.8);
+    return float4(base * (0.15 + 0.85 * diff), 1.0);
+}
+)msl";
+
+struct AppState {
+    SDL_Window *window=nullptr; SDL_GPUDevice *device=nullptr;
+    SDL_GPUGraphicsPipeline *pipeline=nullptr;
+    SDL_GPUBuffer *vbuf=nullptr, *ibuf=nullptr;
+    SDL_GPUTexture *nmap=nullptr, *depth=nullptr; SDL_GPUSampler *sampler=nullptr;
+    Uint32 fb_w=0, fb_h=0; Uint64 start_ns=0;
+};
+
+static SDL_AppResult fail(const char *w){ SDL_Log("%s: %s", w, SDL_GetError()); return SDL_APP_FAILURE; }
+static SDL_GPUShader *make_shader(SDL_GPUDevice *d, const char *src, SDL_GPUShaderStage s, const char *e, Uint32 ubo, Uint32 samplers){
+    SDL_GPUShaderCreateInfo i{}; i.code=(const Uint8*)src; i.code_size=std::strlen(src);
+    i.entrypoint=e; i.format=SDL_GPU_SHADERFORMAT_MSL; i.stage=s; i.num_uniform_buffers=ubo; i.num_samplers=samplers;
+    return SDL_CreateGPUShader(d,&amp;i);
+}
+static void upload_buffer(SDL_GPUDevice *dev, SDL_GPUBuffer *dst, const void *src, Uint32 size){
+    SDL_GPUTransferBufferCreateInfo tbi{}; tbi.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD; tbi.size=size;
+    SDL_GPUTransferBuffer *tb=SDL_CreateGPUTransferBuffer(dev,&amp;tbi);
+    void *m=SDL_MapGPUTransferBuffer(dev,tb,false); std::memcpy(m,src,size); SDL_UnmapGPUTransferBuffer(dev,tb);
+    SDL_GPUCommandBuffer *cmd=SDL_AcquireGPUCommandBuffer(dev); SDL_GPUCopyPass *cp=SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation s{}; s.transfer_buffer=tb; SDL_GPUBufferRegion r{}; r.buffer=dst; r.size=size;
+    SDL_UploadToGPUBuffer(cp,&amp;s,&amp;r,false); SDL_EndGPUCopyPass(cp); SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(dev,tb);
+}
+
+// Generate an "egg-carton" normal map: sinusoidal bumps in U and V.
+static void upload_normalmap(AppState *st)
+{
+    SDL_GPUTransferBufferCreateInfo tbi{}; tbi.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD; tbi.size=NMAP*NMAP*4;
+    SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(st-&gt;device, &amp;tbi);
+    Uint8 *px = (Uint8*)SDL_MapGPUTransferBuffer(st-&gt;device, tb, false);
+    for (int y=0; y&lt;NMAP; ++y) for (int x=0; x&lt;NMAP; ++x) {
+        float u=(float)x/NMAP, v=(float)y/NMAP;
+        float nx = -0.6f * SDL_cosf(u*2*SDL_PI_F*6);
+        float ny = -0.6f * SDL_cosf(v*2*SDL_PI_F*6);
+        float nz = 1.0f;
+        float len = SDL_sqrtf(nx*nx+ny*ny+nz*nz);
+        Uint8 *p = px + (y*NMAP+x)*4;
+        p[0]=(Uint8)((nx/len*0.5f+0.5f)*255); p[1]=(Uint8)((ny/len*0.5f+0.5f)*255);
+        p[2]=(Uint8)((nz/len*0.5f+0.5f)*255); p[3]=255;
+    }
+    SDL_UnmapGPUTransferBuffer(st-&gt;device, tb);
+
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(st-&gt;device);
+    SDL_GPUCopyPass *cp = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureTransferInfo src{}; src.transfer_buffer=tb;
+    SDL_GPUTextureRegion r{}; r.texture=st-&gt;nmap; r.w=NMAP; r.h=NMAP; r.d=1;
+    SDL_UploadToGPUTexture(cp, &amp;src, &amp;r, false);
+    SDL_EndGPUCopyPass(cp); SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(st-&gt;device, tb);
+}
+
+static void make_depth(AppState *st, Uint32 w, Uint32 h){
+    if (st-&gt;depth) SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;depth);
+    SDL_GPUTextureCreateInfo ti{}; ti.type=SDL_GPU_TEXTURETYPE_2D; ti.format=SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    ti.usage=SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET; ti.width=w; ti.height=h; ti.layer_count_or_depth=1; ti.num_levels=1; ti.sample_count=SDL_GPU_SAMPLECOUNT_1;
+    st-&gt;depth=SDL_CreateGPUTexture(st-&gt;device,&amp;ti); st-&gt;fb_w=w; st-&gt;fb_h=h;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Normal Mapping", "1.0", "com.example.sdl3.normalmap");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, true, nullptr);
+    st-&gt;window = SDL_CreateWindow("Normal Mapping", 800, 600, SDL_WINDOW_RESIZABLE);
+    SDL_ClaimWindowForGPUDevice(st-&gt;device, st-&gt;window);
+
+    SDL_GPUBufferCreateInfo vbi{}; vbi.usage=SDL_GPU_BUFFERUSAGE_VERTEX; vbi.size=sizeof(kQuad); st-&gt;vbuf=SDL_CreateGPUBuffer(st-&gt;device,&amp;vbi);
+    SDL_GPUBufferCreateInfo ibi{}; ibi.usage=SDL_GPU_BUFFERUSAGE_INDEX;  ibi.size=sizeof(kIdx);  st-&gt;ibuf=SDL_CreateGPUBuffer(st-&gt;device,&amp;ibi);
+    upload_buffer(st-&gt;device, st-&gt;vbuf, kQuad, sizeof(kQuad));
+    upload_buffer(st-&gt;device, st-&gt;ibuf, kIdx,  sizeof(kIdx));
+
+    SDL_GPUTextureCreateInfo ti{}; ti.type=SDL_GPU_TEXTURETYPE_2D; ti.format=SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    ti.usage=SDL_GPU_TEXTUREUSAGE_SAMPLER; ti.width=NMAP; ti.height=NMAP; ti.layer_count_or_depth=1; ti.num_levels=1; ti.sample_count=SDL_GPU_SAMPLECOUNT_1;
+    st-&gt;nmap = SDL_CreateGPUTexture(st-&gt;device, &amp;ti);
+    upload_normalmap(st);
+
+    SDL_GPUSamplerCreateInfo si{}; si.min_filter=SDL_GPU_FILTER_LINEAR; si.mag_filter=SDL_GPU_FILTER_LINEAR;
+    si.address_mode_u=SDL_GPU_SAMPLERADDRESSMODE_REPEAT; si.address_mode_v=SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    st-&gt;sampler = SDL_CreateGPUSampler(st-&gt;device, &amp;si);
+
+    SDL_GPUShader *vs=make_shader(st-&gt;device,kVS,SDL_GPU_SHADERSTAGE_VERTEX,"vs",1,0);
+    SDL_GPUShader *fs=make_shader(st-&gt;device,kFS,SDL_GPU_SHADERSTAGE_FRAGMENT,"fs",1,1);
+    SDL_GPUVertexBufferDescription vb{}; vb.slot=0; vb.pitch=sizeof(Vertex); vb.input_rate=SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    SDL_GPUVertexAttribute a[4]{};
+    a[0]={0,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex,px)};
+    a[1]={1,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex,nx)};
+    a[2]={2,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex,tx)};
+    a[3]={3,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex,u)};
+    SDL_GPUVertexInputState vi{}; vi.vertex_buffer_descriptions=&amp;vb; vi.num_vertex_buffers=1; vi.vertex_attributes=a; vi.num_vertex_attributes=4;
+    SDL_GPUColorTargetDescription ct{}; ct.format=SDL_GetGPUSwapchainTextureFormat(st-&gt;device, st-&gt;window);
+    SDL_GPUGraphicsPipelineCreateInfo pc{};
+    pc.vertex_shader=vs; pc.fragment_shader=fs; pc.primitive_type=SDL_GPU_PRIMITIVETYPE_TRIANGLELIST; pc.vertex_input_state=vi;
+    pc.target_info.color_target_descriptions=&amp;ct; pc.target_info.num_color_targets=1;
+    pc.target_info.depth_stencil_format=SDL_GPU_TEXTUREFORMAT_D32_FLOAT; pc.target_info.has_depth_stencil_target=true;
+    pc.depth_stencil_state.enable_depth_test=true; pc.depth_stencil_state.enable_depth_write=true; pc.depth_stencil_state.compare_op=SDL_GPU_COMPAREOP_LESS;
+    st-&gt;pipeline=SDL_CreateGPUGraphicsPipeline(st-&gt;device,&amp;pc);
+    SDL_ReleaseGPUShader(st-&gt;device,vs); SDL_ReleaseGPUShader(st-&gt;device,fs);
+    if(!st-&gt;pipeline) return fail("pipeline");
+
+    st-&gt;start_ns=SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (SDL_GetTicksNS() - st-&gt;start_ns) / 1.0e9f;
+
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(st-&gt;device);
+    SDL_GPUTexture *swap=nullptr; Uint32 sw=0, sh=0;
+    SDL_WaitAndAcquireGPUSwapchainTexture(cmd, st-&gt;window, &amp;swap, &amp;sw, &amp;sh);
+
+    if (swap) {
+        if (sw != st-&gt;fb_w || sh != st-&gt;fb_h) make_depth(st, sw, sh);
+        float aspect = sh &gt; 0 ? (float)sw/(float)sh : 1.0f;
+
+        struct { Mat4 mvp, model; } ubo;
+        ubo.model = mat4_rotate_y(t*0.6f);
+        Mat4 view = mat4_translate(0,0,-3.5f);
+        Mat4 proj = mat4_perspective(55.0f*SDL_PI_F/180.0f, aspect, 0.1f, 100.0f);
+        ubo.mvp = mat4_mul(proj, mat4_mul(view, ubo.model));
+
+        // Orbiting light direction (points from light toward scene).
+        float lx = SDL_cosf(t), lz = SDL_sinf(t);
+        struct { float dir[3]; float pad; } L{ { -lx, -0.4f, -lz }, 0 };
+
+        SDL_GPUColorTargetInfo c{}; c.texture=swap; c.clear_color=SDL_FColor{0.04f,0.05f,0.07f,1};
+        c.load_op=SDL_GPU_LOADOP_CLEAR; c.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPUDepthStencilTargetInfo d{}; d.texture=st-&gt;depth; d.clear_depth=1.0f;
+        d.load_op=SDL_GPU_LOADOP_CLEAR; d.store_op=SDL_GPU_STOREOP_DONT_CARE;
+        SDL_GPURenderPass *p = SDL_BeginGPURenderPass(cmd, &amp;c, 1, &amp;d);
+
+        SDL_BindGPUGraphicsPipeline(p, st-&gt;pipeline);
+        SDL_GPUBufferBinding vb{}; vb.buffer=st-&gt;vbuf; SDL_BindGPUVertexBuffers(p,0,&amp;vb,1);
+        SDL_GPUBufferBinding ib{}; ib.buffer=st-&gt;ibuf; SDL_BindGPUIndexBuffer(p,&amp;ib,SDL_GPU_INDEXELEMENTSIZE_16BIT);
+        SDL_GPUTextureSamplerBinding ts{}; ts.texture=st-&gt;nmap; ts.sampler=st-&gt;sampler;
+        SDL_BindGPUFragmentSamplers(p,0,&amp;ts,1);
+        SDL_PushGPUVertexUniformData(cmd,0,&amp;ubo,sizeof(ubo));
+        SDL_PushGPUFragmentUniformData(cmd,0,&amp;L,sizeof(L));
+        SDL_DrawGPUIndexedPrimitives(p,6,1,0,0,0);
+        SDL_EndGPURenderPass(p);
+    }
+
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (st-&gt;device) {
+        if (st-&gt;sampler) SDL_ReleaseGPUSampler(st-&gt;device, st-&gt;sampler);
+        if (st-&gt;nmap)    SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;nmap);
+        if (st-&gt;depth)   SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;depth);
+        if (st-&gt;ibuf) SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;ibuf);
+        if (st-&gt;vbuf) SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;vbuf);
+        if (st-&gt;pipeline) SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;pipeline);
+        if (st-&gt;window) SDL_ReleaseWindowFromGPUDevice(st-&gt;device, st-&gt;window);
+        SDL_DestroyGPUDevice(st-&gt;device);
+    }
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Toggle the map off (return <code>n = N</code>) on a keypress. The quad goes flat and dull — proof the bumps are pure lighting, not geometry.</li>
+        <li>Add a specular term (recipe 09's Blinn-Phong) using the perturbed normal. Bumps now catch highlights, which sells the illusion far more than diffuse alone.</li>
+        <li>Generate a sharper pattern — bricks, rivets — by writing a height field and deriving normals from its gradient.</li>
+        <li>Wrap the map onto the cube from <a href="06-the-3d-cube.html">recipe 06</a>, supplying a correct per-face tangent.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="14-skybox-and-cubemaps.html">← 14. Skybox &amp; Cubemaps</a>
+    <a href="index.html">Index</a>
+    <a href="16-shadow-mapping.html">Next: Shadow Mapping →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">3D Track</a> · Recipe 15
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>2D Track — SDL3 Recipes</title>
-    <meta name="description" content="Twelve C++ callback-style SDL3 recipes for 2D games, using SDL_Renderer. Beginner to advanced.">
+    <meta name="description" content="Sixteen C++ callback-style SDL3 recipes for 2D games, using SDL_Renderer. Beginner to advanced.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,10 +19,10 @@
 <header class="hero">
     <h1>2D Track</h1>
     <p class="lede">
-        Twelve recipes that take you from opening a window to shipping a
-        playable Pong clone, all in C++ with SDL3's callback model and the
-        high-level <code>SDL_Renderer</code> drawing API. Each one builds on
-        the previous — work through them in order.
+        Sixteen recipes that take you from opening a window to a controller-driven,
+        audio-mixing game with an offscreen pixel-art pipeline — all in C++ with
+        SDL3's callback model and the high-level <code>SDL_Renderer</code> drawing
+        API. Each one builds on the previous — work through them in order.
     </p>
 </header>
 
@@ -134,6 +134,42 @@
             <span class="title">
                 <a href="12-mini-game-pong.html">Mini Game: Pong</a>
                 <div class="blurb">Capstone — paddles, ball, scoring, simple AI. Everything from 01–11 in one file.</div>
+            </span>
+            <span class="badge badge-advanced">Advanced</span>
+        </li>
+
+        <li>
+            <span class="num">13</span>
+            <span class="title">
+                <a href="13-gamepad-input.html">Gamepad Input</a>
+                <div class="blurb">Hot-plug a controller; read sticks, triggers and buttons with <code>SDL_Gamepad</code> — dead zone and all.</div>
+            </span>
+            <span class="badge badge-intermediate">Intermediate</span>
+        </li>
+
+        <li>
+            <span class="num">14</span>
+            <span class="title">
+                <a href="14-music-and-mixing.html">Music &amp; Mixing</a>
+                <div class="blurb">A looping music bed plus layered one-shot SFX — multiple audio streams, per-stream gain.</div>
+            </span>
+            <span class="badge badge-intermediate">Intermediate</span>
+        </li>
+
+        <li>
+            <span class="num">15</span>
+            <span class="title">
+                <a href="15-save-load-and-ui.html">Save/Load &amp; Simple UI</a>
+                <div class="blurb">Persist a high score with <code>SDL_GetPrefPath</code> / <code>SDL_IOStream</code>; immediate-mode buttons and a menu.</div>
+            </span>
+            <span class="badge badge-intermediate">Intermediate</span>
+        </li>
+
+        <li>
+            <span class="num">16</span>
+            <span class="title">
+                <a href="16-render-targets.html">Render Targets &amp; Screen Effects</a>
+                <div class="blurb">Render at a fixed internal resolution to a target texture; letterbox scaling, screen shake, flash.</div>
             </span>
             <span class="badge badge-advanced">Advanced</span>
         </li>
