@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>17 · SDL_RenderGeometry Meshes — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>17. SDL_RenderGeometry Meshes</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 17 — SDL_RenderGeometry Meshes</h1>
+    <p class="tagline">
+        Drop below the set-then-draw primitive API and feed the renderer raw
+        triangles. Per-vertex colour, per-vertex texture coordinates, arbitrary
+        polygons — all from one call.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>The <code>SDL_Vertex</code> struct — a position, a colour, and a texture coordinate per corner.</li>
+        <li>Drawing a mesh with <code>SDL_RenderGeometry</code> and an optional index array.</li>
+        <li>Why this is the <em>only</em> 2D call that can interpolate colour across a face — the primitive API can't.</li>
+        <li>Building a filled polygon as a triangle <strong>fan</strong>, and texturing a quad with per-vertex <code>tex_coord</code>.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="02-drawing-primitives.html">Recipe 02 — Drawing Primitives</a>
+        for the set-then-draw model we're contrasting against, and
+        <a href="05-loading-textures.html">recipe 05</a> for creating a texture
+        in code (we sample one here).
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>One vertex, three pieces of data</h3>
+    <p>
+        Everything in recipe 02 used the renderer's <em>current</em> draw colour:
+        you set one colour, then drew one shape in it. That model can't make a
+        single triangle fade from red at one corner to blue at another — the
+        whole shape is one flat colour. <code>SDL_RenderGeometry</code> lifts
+        that limit. You hand it an array of vertices, and each vertex carries its
+        own colour and texture coordinate:
+    </p>
+<pre><code class="language-cpp">typedef struct SDL_Vertex {
+    SDL_FPoint position;    // where, in render coordinates
+    SDL_FColor color;       // per-vertex RGBA, each channel a float 0..1
+    SDL_FPoint tex_coord;   // 0..1 across the bound texture (ignored if none)
+} SDL_Vertex;
+</code></pre>
+    <p>
+        Note <code>SDL_FColor</code> channels are floats in <strong>0..1</strong>,
+        not the 0..255 bytes the primitive API takes. The renderer interpolates
+        all three fields linearly across each triangle, so colour and texture
+        sampling vary smoothly between the corners.
+    </p>
+
+    <h3>A gradient triangle</h3>
+    <p>
+        The simplest mesh is three vertices, no index array, no texture. Give
+        each corner a different colour and the face becomes a smooth gradient —
+        the thing the primitive API simply cannot do:
+    </p>
+<pre><code class="language-cpp">SDL_Vertex tri[3] = {
+    { { 200.0f, 100.0f }, { 1.0f, 0.2f, 0.2f, 1.0f }, { 0, 0 } },  // red
+    { { 320.0f, 300.0f }, { 0.2f, 1.0f, 0.2f, 1.0f }, { 0, 0 } },  // green
+    { {  80.0f, 300.0f }, { 0.2f, 0.4f, 1.0f, 1.0f }, { 0, 0 } },  // blue
+};
+// texture = nullptr → tex_coord is ignored, only colour matters.
+SDL_RenderGeometry(renderer, nullptr, tri, 3, nullptr, 0);
+</code></pre>
+    <p>
+        With no texture, <code>tex_coord</code> is meaningless and we leave it
+        zeroed. The signature is
+        <code>SDL_RenderGeometry(renderer, SDL_Texture *tex, const SDL_Vertex *verts, int num_verts, const int *indices, int num_indices)</code>;
+        passing <code>nullptr, 0</code> for the indices means "draw the vertices
+        in order, three at a time".
+    </p>
+
+    <h3>A polygon as a triangle fan</h3>
+    <p>
+        A filled circle or regular polygon is a <strong>fan</strong>: one centre
+        vertex, then a ring of rim vertices, and a triangle joining the centre to
+        each adjacent pair on the rim. Rather than repeat the centre vertex for
+        every triangle, we list each vertex <em>once</em> and reuse it through an
+        <strong>index array</strong> — every triangle is three integer indices
+        into the vertex list:
+    </p>
+<pre><code class="language-cpp">// segments rim vertices + 1 centre. Index 0 is the centre.
+const int SEG = 24;
+SDL_Vertex v[SEG + 1];
+v[0] = { { cx, cy }, centre_colour, { 0, 0 } };           // hub
+for (int i = 0; i &lt; SEG; ++i) {
+    float a = (float)i / SEG * 2.0f * SDL_PI_F;
+    v[i + 1].position  = { cx + SDL_cosf(a) * r, cy + SDL_sinf(a) * r };
+    v[i + 1].color     = hue_to_fcolor(a);                // per-vertex hue
+    v[i + 1].tex_coord = { 0, 0 };
+}
+
+int idx[SEG * 3];
+for (int i = 0; i &lt; SEG; ++i) {
+    idx[i * 3 + 0] = 0;                    // centre
+    idx[i * 3 + 1] = 1 + i;                // this rim point
+    idx[i * 3 + 2] = 1 + (i + 1) % SEG;    // next rim point (wraps)
+}
+SDL_RenderGeometry(renderer, nullptr, v, SEG + 1, idx, SEG * 3);
+</code></pre>
+    <p>
+        Because each rim vertex carries its own hue and the centre is white, the
+        fan renders as a smooth colour wheel. Raise <code>SEG</code> and the
+        polygon rounds into a disc — the only cost is more triangles.
+    </p>
+
+    <h3>A textured quad</h3>
+    <p>
+        Bind a texture and the <code>tex_coord</code> field comes alive. A quad
+        is two triangles — four corner vertices, six indices. The texture
+        coordinates run 0..1 from the top-left to the bottom-right of the
+        texture:
+    </p>
+<pre><code class="language-cpp">SDL_FColor white = { 1, 1, 1, 1 };
+SDL_Vertex q[4] = {
+    { { 400, 120 }, white, { 0, 0 } },   // top-left
+    { { 560, 120 }, white, { 1, 0 } },   // top-right
+    { { 560, 280 }, white, { 1, 1 } },   // bottom-right
+    { { 400, 280 }, white, { 0, 1 } },   // bottom-left
+};
+int qi[6] = { 0, 1, 2,  0, 2, 3 };       // two triangles sharing an edge
+SDL_RenderGeometry(renderer, tex, q, 4, qi, 6);
+</code></pre>
+    <p>
+        Keep the colour white and the texture comes through unchanged. Tint the
+        vertex colours and they <em>multiply</em> the sampled texels — set them
+        to a warm orange and the whole quad takes on that wash, which is how you
+        get cheap per-sprite tinting straight out of the geometry call.
+    </p>
+
+    <div class="note">
+        <strong><code>tex_coord</code> is only read when a texture is bound.</strong>
+        Pass <code>nullptr</code> as the texture and the renderer ignores
+        <code>tex_coord</code> entirely — only <code>position</code> and
+        <code>color</code> matter. That's why the gradient triangle and the fan
+        can leave it zeroed.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A smooth multi-colour polygon fan spins on the left while a textured quad
+        sits on the right, sampling a checkerboard we build in code. The fan's
+        segment count is high enough to read as a disc; drop it and you'll see
+        the polygon edges.
+    </p>
+<pre><code class="language-cpp">/*
+ * 17-render-geometry.cpp — SDL_RenderGeometry: a gradient fan + a textured quad.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const int SEG = 48;          // rim segments of the fan
+
+struct AppState {
+    SDL_Window   *window   = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture  *tex      = nullptr;
+    float  angle = 0.0f;            // fan rotation, radians
+    Uint64 last_ns = 0;
+};
+
+/* Map a hue angle (radians) to an SDL_FColor. Cheap 0..1 RGB cycle. */
+static SDL_FColor hue_fcolor(float a)
+{
+    float r = 0.5f + 0.5f * SDL_cosf(a);
+    float g = 0.5f + 0.5f * SDL_cosf(a + 2.094f);   // +120°
+    float b = 0.5f + 0.5f * SDL_cosf(a + 4.188f);   // +240°
+    return SDL_FColor{ r, g, b, 1.0f };
+}
+
+/* Build a 64x64 checkerboard texture with SDL_UpdateTexture. */
+static SDL_Texture *make_checker(SDL_Renderer *r)
+{
+    const int W = 64, H = 64, CELL = 8;
+    SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888,
+                                       SDL_TEXTUREACCESS_STATIC, W, H);
+    if (!t) return nullptr;
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_NEAREST);
+
+    Uint32 px[W * H];
+    for (int y = 0; y &lt; H; ++y) {
+        for (int x = 0; x &lt; W; ++x) {
+            bool on = ((x / CELL) + (y / CELL)) % 2 == 0;
+            // RGBA8888 byte order is R,G,B,A from the high byte down.
+            px[y * W + x] = on ? 0xE6C84BFFu : 0x2E3850FFu;
+        }
+    }
+    SDL_UpdateTexture(t, nullptr, px, W * sizeof(Uint32));
+    return t;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Render Geometry", "1.0", "com.example.sdl3.geometry");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Render Geometry", 800, 480,
+                                     SDL_WINDOW_RESIZABLE, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    st-&gt;tex = make_checker(st-&gt;renderer);
+    if (!st-&gt;tex) { SDL_Log("checker: %s", SDL_GetError()); delete st; return SDL_APP_FAILURE; }
+
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE)
+        return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+    st-&gt;angle += dt * 0.6f;
+
+    gfx::clear(st-&gt;renderer, 16, 18, 26);
+
+    // --- 1) spinning gradient fan (no texture) ---
+    const float cx = 230.0f, cy = 240.0f, R = 150.0f;
+    SDL_Vertex v[SEG + 1];
+    v[0].position  = { cx, cy };
+    v[0].color     = SDL_FColor{ 1, 1, 1, 1 };        // white hub
+    v[0].tex_coord = { 0, 0 };
+    for (int i = 0; i &lt; SEG; ++i) {
+        float a = st-&gt;angle + (float)i / SEG * 2.0f * SDL_PI_F;
+        v[i + 1].position  = { cx + SDL_cosf(a) * R, cy + SDL_sinf(a) * R };
+        v[i + 1].color     = hue_fcolor(a);
+        v[i + 1].tex_coord = { 0, 0 };
+    }
+    int idx[SEG * 3];
+    for (int i = 0; i &lt; SEG; ++i) {
+        idx[i * 3 + 0] = 0;
+        idx[i * 3 + 1] = 1 + i;
+        idx[i * 3 + 2] = 1 + (i + 1) % SEG;
+    }
+    SDL_RenderGeometry(st-&gt;renderer, nullptr, v, SEG + 1, idx, SEG * 3);
+
+    // --- 2) textured quad (two triangles, six indices) ---
+    SDL_FColor white = { 1, 1, 1, 1 };
+    SDL_Vertex q[4] = {
+        { { 500, 120 }, white, { 0, 0 } },
+        { { 720, 120 }, white, { 1, 0 } },
+        { { 720, 340 }, white, { 1, 1 } },
+        { { 500, 340 }, white, { 0, 1 } },
+    };
+    int qi[6] = { 0, 1, 2,  0, 2, 3 };
+    SDL_RenderGeometry(st-&gt;renderer, st-&gt;tex, q, 4, qi, 6);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        if (st-&gt;tex) SDL_DestroyTexture(st-&gt;tex);
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Turn the fan into a perfectly smooth disc by raising <code>SEG</code> to 96 or 128 — count the triangles and notice the edges vanish.</li>
+        <li>Texture-map the fan: give each rim vertex a <code>tex_coord</code> on a unit circle (<code>0.5 + 0.5*cos</code>, <code>0.5 + 0.5*sin</code>) and pass the checker texture instead of <code>nullptr</code>.</li>
+        <li>Reach for <code>SDL_RenderGeometryRaw</code> when your data is interleaved or strided — it takes raw byte pointers and strides for position, colour and UV separately, so you can draw straight out of your own vertex structs without repacking.</li>
+        <li>Vertex-colour-tint the textured quad: keep the <code>tex_coord</code>s but set the four colours to a non-white tint and watch the texels multiply by it — instant per-sprite colouring.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="16-render-targets.html">← 16. Render Targets</a>
+    <a href="index.html">Index</a>
+    <a href="18-sprite-transforms.html">Next: Sprite Rotation &amp; Flip →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 17
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

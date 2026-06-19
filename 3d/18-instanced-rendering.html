@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>18 · Instanced Rendering — 3D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">3D Track</a> ›
+    <span>18. Instanced Rendering</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 18 — Instanced Rendering</h1>
+    <p class="tagline">
+        Draw a whole field of cubes — hundreds or thousands — in a single
+        draw call. Per-instance data lives in its own vertex buffer that the
+        GPU advances once per object instead of once per vertex.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Why one instanced draw beats thousands of draw calls and uniform pushes.</li>
+        <li>A second vertex buffer bound at <strong>slot 1</strong> with <code>SDL_GPU_VERTEXINPUTRATE_INSTANCE</code>.</li>
+        <li>Mixing per-vertex attributes (slot 0) and per-instance attributes (slot 1) in one pipeline.</li>
+        <li>The single instanced draw via <code>SDL_DrawGPUIndexedPrimitives</code> with a non-1 instance count.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="06-the-3d-cube.html">Recipe 06 — The 3D Cube</a> for the
+        geometry, <a href="07-depth-testing.html">recipe 07</a> for depth, and
+        <a href="10-multiple-objects.html">recipe 10</a> — which drew a grid the
+        slow way, one <code>SDL_DrawGPUIndexedPrimitives</code> per cube. This
+        recipe collapses that loop into a single call.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The problem with one-draw-per-object</h3>
+    <p>
+        In <a href="10-multiple-objects.html">recipe 10</a> a grid of cubes was
+        drawn by looping on the CPU: push a fresh model matrix, issue a draw,
+        repeat. That's fine for a dozen cubes and miserable for a thousand —
+        every iteration is a uniform upload and a draw call, and the CPU spends
+        all its time feeding the GPU instead of the GPU spending its time
+        drawing. <strong>Instancing</strong> inverts that: the geometry is
+        uploaded once, the per-object data is uploaded once as a flat array, and
+        a single draw call stamps out every copy.
+    </p>
+
+    <h3>Two buffers, two input rates</h3>
+    <p>
+        The cube vertices live in slot 0 exactly as before, advanced once per
+        vertex (<code>SDL_GPU_VERTEXINPUTRATE_VERTEX</code>). The new idea is a
+        second buffer in <strong>slot 1</strong> holding one record per instance
+        — here a world-space offset and a colour — advanced once per
+        <em>instance</em> (<code>SDL_GPU_VERTEXINPUTRATE_INSTANCE</code>). The
+        GPU keeps the slot-1 pointer fixed across all 36 vertices of a cube, then
+        steps it forward for the next cube.
+    </p>
+<pre><code class="language-cpp">struct Vertex   { float x, y, z; };                 // slot 0, per vertex
+struct Instance { float ox, oy, oz; float r, g, b, a; };  // slot 1, per instance
+
+SDL_GPUVertexBufferDescription vbufs[2]{};
+vbufs[0].slot=0; vbufs[0].pitch=sizeof(Vertex);   vbufs[0].input_rate=SDL_GPU_VERTEXINPUTRATE_VERTEX;
+vbufs[1].slot=1; vbufs[1].pitch=sizeof(Instance); vbufs[1].input_rate=SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+</code></pre>
+    <p>
+        That single field — <code>input_rate</code> — is the whole trick. Both
+        buffers feed the same vertex shader; they just advance at different
+        rates.
+    </p>
+
+    <h3>Attribute locations across slots</h3>
+    <p>
+        Attribute <em>locations</em> are global to the pipeline, but each
+        attribute names which <code>buffer_slot</code> it reads from. Position is
+        location 0 from slot 0; the per-instance offset and colour are locations
+        2 and 3 from slot 1. (Location 1 is left free here so the cube's own
+        per-vertex slots line up with the lit/textured recipes — feel free to
+        renumber.)
+    </p>
+<pre><code class="language-cpp">SDL_GPUVertexAttribute attrs[3]{};
+// per-vertex (slot 0)
+attrs[0].location=0; attrs[0].buffer_slot=0; attrs[0].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[0].offset=offsetof(Vertex,x);
+// per-instance (slot 1)
+attrs[1].location=2; attrs[1].buffer_slot=1; attrs[1].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset=offsetof(Instance,ox);
+attrs[2].location=3; attrs[2].buffer_slot=1; attrs[2].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4; attrs[2].offset=offsetof(Instance,r);
+
+SDL_GPUVertexInputState vis{};
+vis.vertex_buffer_descriptions=vbufs; vis.num_vertex_buffers=2;
+vis.vertex_attributes=attrs;          vis.num_vertex_attributes=3;
+</code></pre>
+
+    <h3>Generating the instance array</h3>
+    <p>
+        Build the per-instance data once on the CPU and upload it like any other
+        vertex buffer. Here a 12×12 grid laid out on the XZ plane, each cube
+        tinted by a hue that sweeps across the field.
+    </p>
+<pre><code class="language-cpp">const int GRID = 12;
+const int NUM_INSTANCES = GRID * GRID;
+std::vector&lt;Instance&gt; inst(NUM_INSTANCES);
+for (int z = 0; z &lt; GRID; ++z)
+    for (int x = 0; x &lt; GRID; ++x) {
+        Instance &amp;it = inst[z * GRID + x];
+        it.ox = (x - GRID * 0.5f) * 1.6f;
+        it.oy = 0.0f;
+        it.oz = (z - GRID * 0.5f) * 1.6f;
+        float h = (float)(x + z) / (float)(2 * GRID);   // 0..1 hue sweep
+        it.r = 0.5f + 0.5f * SDL_sinf(h * 6.283f + 0.0f);
+        it.g = 0.5f + 0.5f * SDL_sinf(h * 6.283f + 2.094f);
+        it.b = 0.5f + 0.5f * SDL_sinf(h * 6.283f + 4.188f);
+        it.a = 1.0f;
+    }
+</code></pre>
+
+    <h3>The vertex shader sees both streams</h3>
+    <p>
+        Per-vertex <code>pos</code> arrives at <code>attribute(0)</code>; the
+        per-instance <code>ioffset</code> and <code>icolor</code> arrive at
+        <code>attribute(2)</code> and <code>attribute(3)</code>. The model
+        transform is just a translation by the offset, so the world position is
+        <code>pos + ioffset</code>. A single shared <code>viewProj</code> uniform
+        (buffer 0) projects everything.
+    </p>
+<pre><code class="language-cpp">static const char *kVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSIn  { float3 pos     [[attribute(0)]];
+               float3 ioffset [[attribute(2)]];
+               float4 icolor  [[attribute(3)]]; };
+struct VSOut { float4 position [[position]]; float4 color; };
+struct UBO   { float4x4 viewProj; };
+vertex VSOut vs(VSIn in [[stage_in]], constant UBO &amp;u [[buffer(0)]]) {
+    VSOut o;
+    float3 world = in.pos + in.ioffset;        // model = translate(ioffset)
+    o.position = u.viewProj * float4(world, 1.0);
+    o.color    = in.icolor;
+    return o;
+}
+)msl";
+static const char *kFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float4 color; };
+fragment float4 fs(VSOut in [[stage_in]]) { return in.color; }
+)msl";
+</code></pre>
+
+    <h3>One draw, every cube</h3>
+    <p>
+        Bind both vertex buffers (slot 0 = cube, slot 1 = instances), bind the
+        index buffer, push the one <code>viewProj</code> uniform, and issue a
+        single indexed draw whose <em>instance count</em> is
+        <code>NUM_INSTANCES</code>. The GPU runs the 36-index cube once per
+        instance, swapping in the next slot-1 record each time.
+    </p>
+<pre><code class="language-cpp">SDL_GPUBufferBinding vb[2]{};
+vb[0].buffer = st-&gt;vbuf; vb[1].buffer = st-&gt;ibuf_inst;   // slots 0 and 1
+SDL_BindGPUVertexBuffers(pass, 0, vb, 2);
+SDL_GPUBufferBinding ib{}; ib.buffer = st-&gt;ibuf;
+SDL_BindGPUIndexBuffer(pass, &amp;ib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+SDL_PushGPUVertexUniformData(cmd, 0, &amp;viewProj, sizeof(viewProj));
+SDL_DrawGPUIndexedPrimitives(pass, /*num_indices=*/36, /*num_instances=*/NUM_INSTANCES, 0, 0, 0);
+</code></pre>
+
+    <div class="note">
+        <strong>Why this matters.</strong> The signature
+        <code>SDL_DrawGPUIndexedPrimitives(pass, num_indices, num_instances,
+        first_index, vertex_offset, first_instance)</code> has always had that
+        second argument; every earlier recipe just passed <code>1</code>. Pass
+        <code>NUM_INSTANCES</code> and the cost of "more objects" becomes a
+        bigger buffer, not more CPU work. Grass, asteroid fields, particle
+        quads, crowd characters — all instancing.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A 12×12 field of 144 hued cubes drawn in one call, gently rotating as a
+        whole. Push <code>GRID</code> up and watch the draw count stay at one.
+    </p>
+<pre><code class="language-cpp">/*
+ * 18-instanced-rendering.cpp — a field of cubes drawn in a single instanced
+ * draw call. Per-instance offset + colour live in a slot-1 vertex buffer with
+ * input_rate = INSTANCE.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+
+#include &lt;cstring&gt;
+#include &lt;cstddef&gt;
+#include &lt;vector&gt;
+
+static const int GRID = 12;
+static const int NUM_INSTANCES = GRID * GRID;
+
+struct Vertex   { float x, y, z; };
+struct Instance { float ox, oy, oz; float r, g, b, a; };
+
+// Cube corners only — colour now comes from the per-instance stream.
+static const Vertex kCube[24] = {
+    {  0.5f,-0.5f,-0.5f },{  0.5f, 0.5f,-0.5f },{  0.5f, 0.5f, 0.5f },{  0.5f,-0.5f, 0.5f },
+    { -0.5f,-0.5f, 0.5f },{ -0.5f, 0.5f, 0.5f },{ -0.5f, 0.5f,-0.5f },{ -0.5f,-0.5f,-0.5f },
+    { -0.5f, 0.5f,-0.5f },{ -0.5f, 0.5f, 0.5f },{  0.5f, 0.5f, 0.5f },{  0.5f, 0.5f,-0.5f },
+    { -0.5f,-0.5f, 0.5f },{ -0.5f,-0.5f,-0.5f },{  0.5f,-0.5f,-0.5f },{  0.5f,-0.5f, 0.5f },
+    { -0.5f,-0.5f, 0.5f },{  0.5f,-0.5f, 0.5f },{  0.5f, 0.5f, 0.5f },{ -0.5f, 0.5f, 0.5f },
+    {  0.5f,-0.5f,-0.5f },{ -0.5f,-0.5f,-0.5f },{ -0.5f, 0.5f,-0.5f },{  0.5f, 0.5f,-0.5f },
+};
+static const Uint16 kIdx[36] = {
+    0,1,2, 4,5,6, 8,9,10, 12,13,14, 16,17,18, 20,21,22,
+    0,2,3, 4,6,7, 8,10,11, 12,14,15, 16,18,19, 20,22,23,
+};
+
+struct Mat4 { float m[16]; };
+static Mat4 mat4_identity(){ Mat4 r{}; r.m[0]=r.m[5]=r.m[10]=r.m[15]=1; return r; }
+static Mat4 mat4_translate(float x,float y,float z){ Mat4 r=mat4_identity(); r.m[12]=x;r.m[13]=y;r.m[14]=z; return r;}
+static Mat4 mat4_rotate_y(float a){ float c=SDL_cosf(a),s=SDL_sinf(a); Mat4 r=mat4_identity(); r.m[0]=c;r.m[2]=-s;r.m[8]=s;r.m[10]=c; return r;}
+static Mat4 mat4_rotate_x(float a){ float c=SDL_cosf(a),s=SDL_sinf(a); Mat4 r=mat4_identity(); r.m[5]=c;r.m[6]=s;r.m[9]=-s;r.m[10]=c; return r;}
+static Mat4 mat4_perspective(float fovy,float aspect,float n,float f){ float t=1/SDL_tanf(fovy*0.5f); Mat4 r{}; r.m[0]=t/aspect; r.m[5]=t; r.m[10]=f/(n-f); r.m[11]=-1; r.m[14]=(n*f)/(n-f); return r;}
+static Mat4 mat4_mul(const Mat4 &amp;a,const Mat4 &amp;b){ Mat4 r{}; for(int c=0;c&lt;4;++c) for(int row=0;row&lt;4;++row){ float s=0; for(int k=0;k&lt;4;++k) s+=a.m[k*4+row]*b.m[c*4+k]; r.m[c*4+row]=s; } return r;}
+
+static const char *kVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSIn  { float3 pos     [[attribute(0)]];
+               float3 ioffset [[attribute(2)]];
+               float4 icolor  [[attribute(3)]]; };
+struct VSOut { float4 position [[position]]; float4 color; };
+struct UBO   { float4x4 viewProj; };
+vertex VSOut vs(VSIn in [[stage_in]], constant UBO &amp;u [[buffer(0)]]) {
+    VSOut o;
+    float3 world = in.pos + in.ioffset;
+    o.position = u.viewProj * float4(world, 1.0);
+    o.color    = in.icolor;
+    return o;
+}
+)msl";
+static const char *kFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float4 color; };
+fragment float4 fs(VSOut in [[stage_in]]) { return in.color; }
+)msl";
+
+struct AppState {
+    SDL_Window *window=nullptr; SDL_GPUDevice *device=nullptr;
+    SDL_GPUGraphicsPipeline *pipeline=nullptr;
+    SDL_GPUBuffer *vbuf=nullptr, *ibuf=nullptr, *ibuf_inst=nullptr;
+    SDL_GPUTexture *depth=nullptr;
+    Uint32 depth_w=0, depth_h=0;
+    Uint64 start_ns=0;
+};
+
+static SDL_AppResult fail(const char *w){ SDL_Log("%s: %s", w, SDL_GetError()); return SDL_APP_FAILURE; }
+static SDL_GPUShader *make_shader(SDL_GPUDevice *d, const char *src, SDL_GPUShaderStage s, const char *e,
+                                  Uint32 ubo, Uint32 samplers){
+    SDL_GPUShaderCreateInfo i{}; i.code=(const Uint8*)src; i.code_size=std::strlen(src);
+    i.entrypoint=e; i.format=SDL_GPU_SHADERFORMAT_MSL; i.stage=s;
+    i.num_uniform_buffers=ubo; i.num_samplers=samplers;
+    return SDL_CreateGPUShader(d, &amp;i);
+}
+static bool upload_buffer(SDL_GPUDevice *dev, SDL_GPUBuffer *dst, const void *src, Uint32 size){
+    SDL_GPUTransferBufferCreateInfo tbi{}; tbi.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD; tbi.size=size;
+    SDL_GPUTransferBuffer *tb=SDL_CreateGPUTransferBuffer(dev,&amp;tbi);
+    void *m=SDL_MapGPUTransferBuffer(dev,tb,false); std::memcpy(m,src,size); SDL_UnmapGPUTransferBuffer(dev,tb);
+    SDL_GPUCommandBuffer *cmd=SDL_AcquireGPUCommandBuffer(dev);
+    SDL_GPUCopyPass *cp=SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation s{}; s.transfer_buffer=tb;
+    SDL_GPUBufferRegion r{}; r.buffer=dst; r.size=size;
+    SDL_UploadToGPUBuffer(cp,&amp;s,&amp;r,false);
+    SDL_EndGPUCopyPass(cp); SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(dev,tb); return true;
+}
+static SDL_GPUTexture *create_depth(SDL_GPUDevice *dev, Uint32 w, Uint32 h){
+    SDL_GPUTextureCreateInfo ti{}; ti.type=SDL_GPU_TEXTURETYPE_2D;
+    ti.format=SDL_GPU_TEXTUREFORMAT_D32_FLOAT; ti.usage=SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    ti.width=w; ti.height=h; ti.layer_count_or_depth=1; ti.num_levels=1; ti.sample_count=SDL_GPU_SAMPLECOUNT_1;
+    return SDL_CreateGPUTexture(dev,&amp;ti);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Instanced Rendering", "1.0", "com.example.sdl3.instancing");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, true, nullptr);
+    st-&gt;window = SDL_CreateWindow("Instanced Rendering", 800, 600, SDL_WINDOW_RESIZABLE);
+    SDL_ClaimWindowForGPUDevice(st-&gt;device, st-&gt;window);
+
+    // --- cube geometry (slot 0) + indices ---
+    SDL_GPUBufferCreateInfo vbi{}; vbi.usage=SDL_GPU_BUFFERUSAGE_VERTEX; vbi.size=sizeof(kCube);
+    st-&gt;vbuf=SDL_CreateGPUBuffer(st-&gt;device,&amp;vbi);
+    SDL_GPUBufferCreateInfo ibi{}; ibi.usage=SDL_GPU_BUFFERUSAGE_INDEX;  ibi.size=sizeof(kIdx);
+    st-&gt;ibuf=SDL_CreateGPUBuffer(st-&gt;device,&amp;ibi);
+    upload_buffer(st-&gt;device, st-&gt;vbuf, kCube, sizeof(kCube));
+    upload_buffer(st-&gt;device, st-&gt;ibuf, kIdx,  sizeof(kIdx));
+
+    // --- per-instance data (slot 1) ---
+    std::vector&lt;Instance&gt; inst(NUM_INSTANCES);
+    for (int z = 0; z &lt; GRID; ++z)
+        for (int x = 0; x &lt; GRID; ++x) {
+            Instance &amp;it = inst[z * GRID + x];
+            it.ox = (x - GRID * 0.5f) * 1.6f;
+            it.oy = 0.0f;
+            it.oz = (z - GRID * 0.5f) * 1.6f;
+            float h = (float)(x + z) / (float)(2 * GRID);
+            it.r = 0.5f + 0.5f * SDL_sinf(h * 6.283f + 0.0f);
+            it.g = 0.5f + 0.5f * SDL_sinf(h * 6.283f + 2.094f);
+            it.b = 0.5f + 0.5f * SDL_sinf(h * 6.283f + 4.188f);
+            it.a = 1.0f;
+        }
+    SDL_GPUBufferCreateInfo ibi2{}; ibi2.usage=SDL_GPU_BUFFERUSAGE_VERTEX; ibi2.size=(Uint32)(sizeof(Instance)*NUM_INSTANCES);
+    st-&gt;ibuf_inst=SDL_CreateGPUBuffer(st-&gt;device,&amp;ibi2);
+    upload_buffer(st-&gt;device, st-&gt;ibuf_inst, inst.data(), ibi2.size);
+
+    // --- pipeline: two vertex buffers, one per-vertex, one per-instance ---
+    SDL_GPUShader *vs = make_shader(st-&gt;device, kVS, SDL_GPU_SHADERSTAGE_VERTEX,   "vs", 1, 0);
+    SDL_GPUShader *fs = make_shader(st-&gt;device, kFS, SDL_GPU_SHADERSTAGE_FRAGMENT, "fs", 0, 0);
+
+    SDL_GPUVertexBufferDescription vbufs[2]{};
+    vbufs[0].slot=0; vbufs[0].pitch=sizeof(Vertex);   vbufs[0].input_rate=SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    vbufs[1].slot=1; vbufs[1].pitch=sizeof(Instance); vbufs[1].input_rate=SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+
+    SDL_GPUVertexAttribute attrs[3]{};
+    attrs[0].location=0; attrs[0].buffer_slot=0; attrs[0].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[0].offset=offsetof(Vertex,x);
+    attrs[1].location=2; attrs[1].buffer_slot=1; attrs[1].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset=offsetof(Instance,ox);
+    attrs[2].location=3; attrs[2].buffer_slot=1; attrs[2].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4; attrs[2].offset=offsetof(Instance,r);
+
+    SDL_GPUVertexInputState vis{};
+    vis.vertex_buffer_descriptions=vbufs; vis.num_vertex_buffers=2;
+    vis.vertex_attributes=attrs;          vis.num_vertex_attributes=3;
+
+    SDL_GPUColorTargetDescription ct{}; ct.format = SDL_GetGPUSwapchainTextureFormat(st-&gt;device, st-&gt;window);
+    SDL_GPUGraphicsPipelineCreateInfo pci{};
+    pci.vertex_shader=vs; pci.fragment_shader=fs;
+    pci.primitive_type=SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pci.vertex_input_state=vis;
+    pci.target_info.color_target_descriptions=&amp;ct;
+    pci.target_info.num_color_targets=1;
+    pci.target_info.depth_stencil_format=SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    pci.target_info.has_depth_stencil_target=true;
+    pci.depth_stencil_state.enable_depth_test=true;
+    pci.depth_stencil_state.enable_depth_write=true;
+    pci.depth_stencil_state.compare_op=SDL_GPU_COMPAREOP_LESS;
+
+    st-&gt;pipeline = SDL_CreateGPUGraphicsPipeline(st-&gt;device, &amp;pci);
+    SDL_ReleaseGPUShader(st-&gt;device, vs);
+    SDL_ReleaseGPUShader(st-&gt;device, fs);
+    if (!st-&gt;pipeline) return fail("pipeline");
+
+    st-&gt;start_ns = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (SDL_GetTicksNS() - st-&gt;start_ns) / 1.0e9f;
+
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(st-&gt;device);
+    SDL_GPUTexture *swap=nullptr; Uint32 sw=0, sh=0;
+    SDL_WaitAndAcquireGPUSwapchainTexture(cmd, st-&gt;window, &amp;swap, &amp;sw, &amp;sh);
+
+    if (swap) {
+        if (sw != st-&gt;depth_w || sh != st-&gt;depth_h) {
+            if (st-&gt;depth) SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;depth);
+            st-&gt;depth = create_depth(st-&gt;device, sw, sh);
+            st-&gt;depth_w = sw; st-&gt;depth_h = sh;
+        }
+        float aspect = sh &gt; 0 ? (float)sw / (float)sh : 1.0f;
+
+        // One view/projection for the whole field; slowly orbit the camera.
+        Mat4 spin = mat4_rotate_y(t * 0.2f);
+        Mat4 view = mat4_mul(mat4_translate(0, -2.0f, -22.0f), mat4_mul(mat4_rotate_x(0.5f), spin));
+        Mat4 proj = mat4_perspective(60.0f * SDL_PI_F / 180.0f, aspect, 0.1f, 200.0f);
+        Mat4 viewProj = mat4_mul(proj, view);
+
+        SDL_GPUColorTargetInfo cti{};
+        cti.texture=swap; cti.clear_color=SDL_FColor{0.04f,0.05f,0.08f,1};
+        cti.load_op=SDL_GPU_LOADOP_CLEAR; cti.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPUDepthStencilTargetInfo dti{};
+        dti.texture=st-&gt;depth; dti.clear_depth=1.0f;
+        dti.load_op=SDL_GPU_LOADOP_CLEAR; dti.store_op=SDL_GPU_STOREOP_DONT_CARE;
+
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd, &amp;cti, 1, &amp;dti);
+        SDL_BindGPUGraphicsPipeline(pass, st-&gt;pipeline);
+        SDL_GPUBufferBinding vb[2]{};
+        vb[0].buffer = st-&gt;vbuf; vb[1].buffer = st-&gt;ibuf_inst;
+        SDL_BindGPUVertexBuffers(pass, 0, vb, 2);
+        SDL_GPUBufferBinding ib{}; ib.buffer = st-&gt;ibuf;
+        SDL_BindGPUIndexBuffer(pass, &amp;ib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+        SDL_PushGPUVertexUniformData(cmd, 0, &amp;viewProj, sizeof(viewProj));
+        SDL_DrawGPUIndexedPrimitives(pass, 36, NUM_INSTANCES, 0, 0, 0);
+        SDL_EndGPURenderPass(pass);
+    }
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (st-&gt;device) {
+        if (st-&gt;depth)     SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;depth);
+        if (st-&gt;ibuf_inst) SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;ibuf_inst);
+        if (st-&gt;ibuf)      SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;ibuf);
+        if (st-&gt;vbuf)      SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;vbuf);
+        SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;pipeline);
+        if (st-&gt;window) SDL_ReleaseWindowFromGPUDevice(st-&gt;device, st-&gt;window);
+        SDL_DestroyGPUDevice(st-&gt;device);
+    }
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Animate the offsets in the vertex shader: pass time as a uniform and add <code>sin(time + float(instance_id) * 0.3)</code> to <code>world.y</code>. Receive the instance index with <code>uint iid [[instance_id]]</code> — the field becomes a rippling wave.</li>
+        <li>Push <code>GRID</code> to ~316 (≈100 000 cubes). The only thing that grows is the instance buffer; the draw call count stays at exactly one.</li>
+        <li>Add a per-instance scale (and a rotation angle) to the <code>Instance</code> struct, build a full model matrix in the shader, and give every cube its own size and spin.</li>
+        <li>Jitter the colours: perturb each instance's hue with <code>SDL_randf()</code> at build time, or recompute colour from the animated height in the fragment shader.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="17-compute-shaders.html">← 17. Compute Shaders</a>
+    <a href="index.html">Index</a>
+    <a href="19-post-processing-bloom.html">Next: Post-Processing &amp; Bloom →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">3D Track</a> · Recipe 18
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

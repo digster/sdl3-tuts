@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>20 · Blend Modes &amp; 2D Lighting — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>20. Blend Modes &amp; 2D Lighting</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 20 — Blend Modes &amp; 2D Lighting</h1>
+    <p class="tagline">
+        Learn the four built-in blend modes, then put the multiply mode to work:
+        build a light map on an offscreen target and composite it over the scene
+        for moody, coloured 2D lighting.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>The four built-in blend modes — <code>BLEND</code>, <code>ADD</code>, <code>MOD</code>, <code>MUL</code> — and what each one does visually.</li>
+        <li>Setting them per-texture (<code>SDL_SetTextureBlendMode</code>) and per-primitive (<code>SDL_SetRenderDrawBlendMode</code>).</li>
+        <li>Building custom factors with <code>SDL_ComposeCustomBlendMode</code> when the built-ins aren't enough.</li>
+        <li>The classic 2D lighting trick: an additive light map composited over the scene with multiply.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="16-render-targets.html">Recipe 16 — Render Targets &amp; Screen
+        Effects</a>, which this builds on directly — the light map is just
+        another offscreen target.
+        <a href="11-particle-systems.html">Recipe 11</a> is handy if you want to
+        feed the lights from a particle source later.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The four blend modes</h3>
+    <p>
+        A blend mode decides how a source pixel you're drawing combines with the
+        destination pixel already there. SDL ships four:
+    </p>
+    <ul>
+        <li><strong><code>SDL_BLENDMODE_BLEND</code></strong> — standard alpha compositing. The source's alpha decides how much it covers the destination. This is the default and what every translucent sprite uses.</li>
+        <li><strong><code>SDL_BLENDMODE_ADD</code></strong> — source is <em>added</em> to the destination, so colours only ever get brighter. Perfect for glows, fire, lasers and lights.</li>
+        <li><strong><code>SDL_BLENDMODE_MOD</code></strong> — destination is <em>multiplied</em> by the source. White leaves it untouched, black crushes it to black — exactly what a light map needs to darken unlit areas.</li>
+        <li><strong><code>SDL_BLENDMODE_MUL</code></strong> — multiply that also folds in the source alpha, a softer modulate useful for tinted shadow passes.</li>
+    </ul>
+    <p>
+        Set the mode on whatever you're about to draw. For a texture:
+    </p>
+<pre><code class="language-cpp">SDL_SetTextureBlendMode(light_tex, SDL_BLENDMODE_ADD);   // lights accumulate
+// ...for plain rects, lines, fills:
+SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+</code></pre>
+
+    <h3>A radial light sprite</h3>
+    <p>
+        A light is just a texture whose alpha falls off with distance from the
+        centre — bright in the middle, fading to nothing at the rim. Build it
+        once in code: for each pixel, compute the normalised radius and set alpha
+        from a smooth falloff:
+    </p>
+<pre><code class="language-cpp">for (int y = 0; y &lt; D; ++y) {
+    for (int x = 0; x &lt; D; ++x) {
+        float dx = (x - D * 0.5f) / (D * 0.5f);
+        float dy = (y - D * 0.5f) / (D * 0.5f);
+        float d  = SDL_sqrtf(dx * dx + dy * dy);     // 0 at centre, 1 at edge
+        float a  = SDL_max(0.0f, 1.0f - d);          // linear falloff
+        a = a * a;                                   // square it for a soft core
+        px[y * D + x] = pack_rgba(255, 255, 255, (Uint8)(a * 255));
+    }
+}
+</code></pre>
+    <p>
+        Keep it white — we'll colour each light when we draw it with
+        <code>SDL_SetTextureColorMod</code>, so one sprite serves every light.
+    </p>
+
+    <h3>The light map on an offscreen target</h3>
+    <p>
+        Make a second target the size of the scene (recipe 16). Bind it, clear it
+        to a <em>dim ambient</em> colour — that's how dark unlit areas will be —
+        then draw each light sprite onto it with additive blending so overlapping
+        lights brighten and bleed into one another:
+    </p>
+<pre><code class="language-cpp">SDL_SetRenderTarget(r, st-&gt;lightmap);
+gfx::clear(r, 30, 30, 45);                        // ambient: nothing is pure black
+
+SDL_SetTextureBlendMode(st-&gt;light, SDL_BLENDMODE_ADD);
+for (Light &amp;L : st-&gt;lights) {
+    SDL_SetTextureColorMod(st-&gt;light, L.r, L.g, L.b);   // tint this light
+    SDL_FRect d = { L.x - L.rad, L.y - L.rad, L.rad * 2, L.rad * 2 };
+    SDL_RenderTexture(r, st-&gt;light, nullptr, &amp;d);
+}
+</code></pre>
+
+    <h3>Composite with multiply</h3>
+    <p>
+        Now draw the scene to the window normally, then lay the light map over it
+        with <code>SDL_BLENDMODE_MOD</code>. Multiply means bright spots in the
+        map keep the scene's colour while dim ambient areas darken it — instant
+        pools of light against shadow:
+    </p>
+<pre><code class="language-cpp">SDL_SetRenderTarget(r, nullptr);
+draw_scene(r);                                    // shapes, sprites, whatever
+
+SDL_SetTextureBlendMode(st-&gt;lightmap, SDL_BLENDMODE_MOD);
+SDL_RenderTexture(r, st-&gt;lightmap, nullptr, nullptr);  // nullptr dst = fill window
+</code></pre>
+    <p>
+        Because each light was colour-modded, the multiply also tints the scene —
+        a red lamp washes everything under it red, a cool blue one chills it.
+    </p>
+
+    <div class="note">
+        <strong>When the built-ins aren't enough.</strong>
+        <code>SDL_ComposeCustomBlendMode(srcColorFactor, dstColorFactor,
+        colorOp, srcAlphaFactor, dstAlphaFactor, alphaOp)</code> returns a custom
+        <code>SDL_BlendMode</code> you can hand to the same setter functions. It
+        lets you spell out the exact factors and operation — for example a
+        pre-multiplied-alpha composite, or an additive blend that ignores source
+        alpha.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A handful of shapes form the scene; three coloured lights drift across it.
+        The light map is built additively on an offscreen target each frame and
+        composited over the scene with multiply, so the world is dark except
+        where the lights reach — and tinted by whichever light is nearest.
+    </p>
+<pre><code class="language-cpp">/*
+ * 20-blend-modes-and-lighting.cpp — additive light map, MOD composite.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const int W = 800, H = 500;
+static const int LIGHT_D = 256;        // light sprite diameter
+
+struct Light { float x, y, rad, phase; Uint8 r, g, b; };
+
+struct AppState {
+    SDL_Window   *window   = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture  *lightmap = nullptr;  // offscreen, TEXTUREACCESS_TARGET
+    SDL_Texture  *light    = nullptr;  // the radial sprite
+    Light  lights[3];
+    float  t = 0.0f;
+    Uint64 last_ns = 0;
+};
+
+/* A white radial-falloff sprite: bright centre, transparent rim. */
+static SDL_Texture *make_light(SDL_Renderer *r)
+{
+    SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888,
+                                       SDL_TEXTUREACCESS_STATIC, LIGHT_D, LIGHT_D);
+    if (!t) return nullptr;
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
+
+    // 256×256×4 = 256 KB — too big for the stack, so allocate on the heap.
+    Uint32 *px = (Uint32 *)SDL_malloc(LIGHT_D * LIGHT_D * sizeof(Uint32));
+    if (!px) { SDL_DestroyTexture(t); return nullptr; }
+    for (int y = 0; y &lt; LIGHT_D; ++y) {
+        for (int x = 0; x &lt; LIGHT_D; ++x) {
+            float dx = (x - LIGHT_D * 0.5f) / (LIGHT_D * 0.5f);
+            float dy = (y - LIGHT_D * 0.5f) / (LIGHT_D * 0.5f);
+            float d  = SDL_sqrtf(dx * dx + dy * dy);
+            float a  = SDL_max(0.0f, 1.0f - d);
+            a = a * a;                                  // soft core
+            Uint8 av = (Uint8)(a * 255.0f);
+            // RGBA8888: 0xRRGGBBAA
+            px[y * LIGHT_D + x] = 0xFFFFFF00u | av;
+        }
+    }
+    SDL_UpdateTexture(t, nullptr, px, LIGHT_D * sizeof(Uint32));
+    SDL_free(px);
+    return t;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Blend &amp; Lighting", "1.0", "com.example.sdl3.lighting");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Blend Modes &amp; 2D Lighting", W, H,
+                                     SDL_WINDOW_RESIZABLE, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    st-&gt;lightmap = SDL_CreateTexture(st-&gt;renderer, SDL_PIXELFORMAT_RGBA8888,
+                                     SDL_TEXTUREACCESS_TARGET, W, H);
+    st-&gt;light = make_light(st-&gt;renderer);
+    if (!st-&gt;lightmap || !st-&gt;light) { SDL_Log("tex: %s", SDL_GetError()); delete st; return SDL_APP_FAILURE; }
+
+    st-&gt;lights[0] = { 0, 0, 170, 0.0f, 255, 90,  70  };   // warm red
+    st-&gt;lights[1] = { 0, 0, 200, 2.1f, 90,  140, 255 };   // cool blue
+    st-&gt;lights[2] = { 0, 0, 150, 4.2f, 120, 255, 130 };   // green
+
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE)
+        return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+/* Draw the plain scene: a few coloured shapes on a flat floor. */
+static void draw_scene(SDL_Renderer *r)
+{
+    gfx::clear(r, 40, 42, 52);
+    gfx::set_color(r, 70, 110, 90, 255);
+    gfx::fill_rect(r, 0, H - 120, W, 120);              // floor
+    gfx::set_color(r, 180, 160, 120, 255);
+    gfx::fill_rect(r, 140, H - 220, 90, 100);           // a crate
+    gfx::fill_rect(r, 520, H - 260, 110, 140);          // a pillar
+    gfx::set_color(r, 150, 150, 170, 255);
+    gfx::fill_circle(r, 380, 200, 46);                  // a sphere
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+    st-&gt;t += dt;
+
+    // Drift the lights along lazy Lissajous paths.
+    for (int i = 0; i &lt; 3; ++i) {
+        float p = st-&gt;lights[i].phase;
+        st-&gt;lights[i].x = W * (0.5f + 0.38f * SDL_cosf(st-&gt;t * 0.5f + p));
+        st-&gt;lights[i].y = H * (0.5f + 0.32f * SDL_sinf(st-&gt;t * 0.7f + p * 1.3f));
+    }
+
+    // --- pass A: build the light map on the offscreen target ---
+    SDL_SetRenderTarget(st-&gt;renderer, st-&gt;lightmap);
+    gfx::clear(st-&gt;renderer, 26, 26, 38);               // dim ambient
+    SDL_SetTextureBlendMode(st-&gt;light, SDL_BLENDMODE_ADD);
+    for (int i = 0; i &lt; 3; ++i) {
+        Light &amp;L = st-&gt;lights[i];
+        SDL_SetTextureColorMod(st-&gt;light, L.r, L.g, L.b);
+        SDL_FRect d = { L.x - L.rad, L.y - L.rad, L.rad * 2, L.rad * 2 };
+        SDL_RenderTexture(st-&gt;renderer, st-&gt;light, nullptr, &amp;d);
+    }
+
+    // --- pass B: scene to the window, then composite the light map (MOD) ---
+    SDL_SetRenderTarget(st-&gt;renderer, nullptr);
+    draw_scene(st-&gt;renderer);
+
+    SDL_SetTextureBlendMode(st-&gt;lightmap, SDL_BLENDMODE_MOD);
+    SDL_RenderTexture(st-&gt;renderer, st-&gt;lightmap, nullptr, nullptr);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        if (st-&gt;light)    SDL_DestroyTexture(st-&gt;light);
+        if (st-&gt;lightmap) SDL_DestroyTexture(st-&gt;lightmap);
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+    <div class="note">
+        <strong>A note on the MOD composite size.</strong> The light map here is
+        a fixed <code>W×H</code> target while the window is resizable, so on
+        resize the <code>nullptr</code> destination stretches the map to fit. For
+        a production build, recreate the light map at the new output size (as
+        recipe 16 discusses) or render through a fixed-resolution target so the
+        two always match.
+    </div>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Push the light colours further — a saturated red lamp and a deep blue one — and watch the multiply tint the same crate two different colours as the lights pass over it.</li>
+        <li>Add an <code>SDL_BLENDMODE_ADD</code> glow pass <em>on top</em> of the composite: draw the brightest light sprites once more straight to the window for a bloom-ish flare around the cores.</li>
+        <li>Animate a day/night cycle by easing the ambient clear colour of the light map up and down — bright ambient washes the lights out, dark ambient makes them pop.</li>
+        <li>Replace <code>SDL_BLENDMODE_MOD</code> with a custom mode from <code>SDL_ComposeCustomBlendMode</code> and dial the factors yourself — try a half-strength multiply so shadows never go fully black.</li>
+    </ol>
+    <p>
+        And that's the 2D track. You started at
+        <a href="01-hello-window.html">a blank window</a> and worked through
+        input, delta-time movement, textures and animation, audio and mixing,
+        collision, save/load and UI, an offscreen render-target pipeline — and
+        these last four recipes carried you past axis-aligned blits into custom
+        meshes, sprite transforms, a deterministic fixed-timestep loop, and a 2D
+        lighting pass. That's the full toolkit for a polished 2D game in SDL3.
+        When you're ready for the third dimension, the
+        <a href="../3d/index.html">3D Track</a> picks up where this leaves off.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="19-fixed-timestep.html">← 19. Fixed Timestep</a>
+    <a href="index.html">Index</a>
+    <a href="../3d/index.html">3D Track →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 20
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

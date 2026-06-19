@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>17 · Skybox &amp; Cubemaps — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>17. Skybox &amp; Cubemaps</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 17 — Skybox &amp; Cubemaps</h1>
+    <p class="tagline">
+        Wrap the world in a sky. Six procedurally coloured faces become a cube
+        texture; a unit cube whose own positions double as sample directions
+        paints them across the background — pinned to the camera, behind
+        everything.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Building a <strong>cubemap</strong> with <code>bgfx::createTextureCube</code> — six faces in one face-major <code>Memory</code> block.</li>
+        <li>The face order bgfx expects: <code>+X, -X, +Y, -Y, +Z, -Z</code>.</li>
+        <li>A <code>SAMPLERCUBE</code> uniform sampled with a <em>direction</em>, not a 2D UV.</li>
+        <li>Using a cube's local vertex positions as the sample directions — <code>v_dir = a_position</code>.</li>
+        <li>Making geometry behave as a background: strip the view translation, push to the far plane, and depth-test <code>LEQUAL</code> with no Z-write.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        The cube from <a href="07-spinning-cube.html">recipe 07</a>, textures and
+        sampler uniforms from <a href="09-textures-and-samplers.html">recipe
+        09</a>, and views from <a href="10-views-and-render-to-texture.html">recipe
+        10</a>. New shader pair: <code>vs_skybox</code> / <code>fs_skybox</code>.
+        This is the bgfx counterpart to <a href="../3d/14-skybox-and-cubemaps.html">3D
+        recipe 14</a>.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Six faces in one block of memory</h3>
+    <p>
+        A cubemap is six square textures, one per axis direction. bgfx wants them
+        packed back to back in a single <code>Memory</code> in a fixed order —
+        <code>+X, -X, +Y, -Y, +Z, -Z</code> — and that ordering is
+        <strong>face-major</strong>: the whole of face 0, then the whole of face
+        1, and so on (mip levels, if any, are interleaved within each face). We
+        build a tiny <code>RGBA8</code> gradient per face so each direction is a
+        recognisable colour.
+    </p>
+<pre><code class="language-cpp">static bgfx::TextureHandle makeSkyCube()
+{
+    const uint32_t kSize = 128;
+    const uint32_t kFacePix = kSize * kSize;
+    // Six faces, contiguous: +X, -X, +Y, -Y, +Z, -Z.
+    uint32_t *pixels = (uint32_t *)SDL_malloc(6 * kFacePix * 4);
+
+    // A base tint per face so you can tell the directions apart at a glance.
+    // Bytes are R,G,B,A; a little-endian uint32_t packs them 0xAABBGGRR.
+    const uint32_t kTint[6] = {
+        0xff5566ee, // +X  warm red-ish
+        0xff8866cc, // -X  magenta
+        0xffeedd88, // +Y  bright sky (up)
+        0xff332244, // -Y  dark ground (down)
+        0xff66cc66, // +Z  green
+        0xffcc9944, // -Z  teal/blue
+    };
+
+    for (uint32_t f = 0; f &lt; 6; ++f) {
+        uint32_t *face = pixels + f * kFacePix;
+        for (uint32_t y = 0; y &lt; kSize; ++y)
+            for (uint32_t x = 0; x &lt; kSize; ++x) {
+                // Vertical gradient: lighter toward the top of each face.
+                float g = 0.55f + 0.45f * (1.0f - float(y) / float(kSize));
+                uint32_t t = kTint[f];
+                uint8_t r = uint8_t(((t      ) &amp; 0xff) * g);
+                uint8_t gg= uint8_t(((t &gt;&gt;  8) &amp; 0xff) * g);
+                uint8_t b = uint8_t(((t &gt;&gt; 16) &amp; 0xff) * g);
+                face[y * kSize + x] = 0xff000000u | (uint32_t(b) &lt;&lt; 16)
+                                    | (uint32_t(gg) &lt;&lt; 8) | uint32_t(r);
+            }
+    }
+
+    const bgfx::Memory *mem = bgfx::copy(pixels, 6 * kFacePix * 4);
+    SDL_free(pixels);
+
+    // size, hasMips=false, numLayers=1, format, flags, memory(6 faces).
+    return bgfx::createTextureCube((uint16_t)kSize, false, 1,
+                                   bgfx::TextureFormat::RGBA8,
+                                   BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP, mem);
+}
+</code></pre>
+
+    <h3>The cube is both mesh and lookup</h3>
+    <p>
+        We draw an ordinary unit cube — but its job isn't to look like a box. For
+        a point on a unit cube, the vector from the centre <em>to that point</em>
+        is exactly the direction we want to sample the sky in. So the vertex
+        shader simply forwards the local position as a varying, and the fragment
+        shader reads the cubemap along it.
+    </p>
+<pre><code># varying.def.sc (skybox)
+vec3 v_dir : TEXCOORD0;
+
+vec3 a_position : POSITION;
+</code></pre>
+<pre><code># vs_skybox.sc
+$input  a_position
+$output v_dir
+#include "bgfx_shader.sh"
+void main() {
+    v_dir = a_position;                       // local pos doubles as direction
+    vec4 pos = mul(u_modelViewProj, vec4(a_position, 1.0));
+    gl_Position = pos.xyww;                    // force z = w  -&gt;  depth = 1 (far plane)
+}
+</code></pre>
+<pre><code># fs_skybox.sc
+$input v_dir
+#include "bgfx_shader.sh"
+SAMPLERCUBE(s_skybox, 0);                      // stage 0 — matches setTexture
+void main() {
+    gl_FragColor = textureCube(s_skybox, normalize(v_dir));
+}
+</code></pre>
+    <p>
+        That <code>pos.xyww</code> trick is the classic skybox depth hack: after
+        the perspective divide, <code>z/w</code> becomes <code>w/w = 1.0</code>,
+        the maximum depth. The sky lands on the far plane, so any real geometry
+        drawn with a normal depth test wins in front of it.
+    </p>
+
+    <h3>Pinning the sky to the camera</h3>
+    <p>
+        A skybox must never appear to move as the camera translates — only as it
+        <em>rotates</em>. The fix is to drop the translation from the view matrix
+        before handing it to the sky pass, keeping just the rotation. The eye sits
+        forever at the centre of the cube.
+    </p>
+<pre><code class="language-cpp">float view[16];
+bx::mtxLookAt(view, eye, at);
+// Strip translation: zero the bottom row so the sky stays centred on the eye.
+view[12] = view[13] = view[14] = 0.0f;
+bgfx::setViewTransform(0, view, proj);
+</code></pre>
+    <div class="warn">
+        <strong>Depth state is the whole trick.</strong> Draw the sky with
+        <code>BGFX_STATE_DEPTH_TEST_LEQUAL</code> and <strong>no</strong>
+        <code>WRITE_Z</code>. <code>LEQUAL</code> (not <code>LESS</code>) lets a
+        fragment at depth <code>1.0</code> pass against a cleared depth buffer
+        also at <code>1.0</code>; omitting the Z-write means the sky never blocks
+        geometry you draw afterwards. Render the sky <em>first</em> (lowest view
+        id or first submit), then the scene on top.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        The native-handle / <code>loadProgram</code> helpers and the
+        <code>kCube</code> / <code>kCubeIdx</code> arrays are unchanged from
+        recipes 03 and 07 (elided). The cube here only needs positions — no
+        colours or UVs — because its positions <em>are</em> the texture
+        coordinates.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/17-skybox-and-cubemaps.cpp — a procedural cubemap rendered as a skybox.
+ * Native-handle + loadProgram helpers identical to recipe 03 (elided).
+ * Shaders: vs_skybox / fs_skybox.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+
+// A unit cube, positions only — the positions are the sample directions.
+struct PosVertex { float x, y, z; };
+static const PosVertex kCube[8] = {
+    {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1},
+    {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
+};
+static const uint16_t kCubeIdx[36] = {
+    0,1,2, 0,2,3,  4,6,5, 4,7,6,  3,2,6, 3,6,7,
+    4,5,1, 4,1,0,  1,5,6, 1,6,2,  4,0,3, 4,3,7,
+};
+
+static bgfx::TextureHandle makeSkyCube()
+{
+    const uint32_t kSize = 128, kFacePix = kSize * kSize;
+    uint32_t *pixels = (uint32_t *)SDL_malloc(6 * kFacePix * 4);
+    const uint32_t kTint[6] = {
+        0xff5566ee, 0xff8866cc, 0xffeedd88, 0xff332244, 0xff66cc66, 0xffcc9944,
+    };
+    for (uint32_t f = 0; f &lt; 6; ++f) {
+        uint32_t *face = pixels + f * kFacePix;
+        for (uint32_t y = 0; y &lt; kSize; ++y)
+            for (uint32_t x = 0; x &lt; kSize; ++x) {
+                float g = 0.55f + 0.45f * (1.0f - float(y) / float(kSize));
+                uint32_t t = kTint[f];
+                uint8_t  r = uint8_t(((t      ) &amp; 0xff) * g);
+                uint8_t  gg= uint8_t(((t &gt;&gt;  8) &amp; 0xff) * g);
+                uint8_t  b = uint8_t(((t &gt;&gt; 16) &amp; 0xff) * g);
+                face[y * kSize + x] = 0xff000000u | (uint32_t(b) &lt;&lt; 16)
+                                    | (uint32_t(gg) &lt;&lt; 8) | uint32_t(r);
+            }
+    }
+    const bgfx::Memory *mem = bgfx::copy(pixels, 6 * kFacePix * 4);
+    SDL_free(pixels);
+    return bgfx::createTextureCube((uint16_t)kSize, false, 1,
+                                   bgfx::TextureFormat::RGBA8,
+                                   BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP, mem);
+}
+
+struct AppState {
+    SDL_Window              *window = nullptr;
+    int                      width = 1280, height = 720;
+    bgfx::VertexLayout       layout;
+    bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
+    bgfx::IndexBufferHandle  ibh = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle      program  = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle      cubemap  = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle      s_skybox = BGFX_INVALID_HANDLE;
+    float                    yaw = 0.0f, pitch = 0.0f;
+    Uint64                   startNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Skybox", "1.0", "com.example.sdl3.bgfx.skybox");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Skybox &amp; Cubemaps", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type              = bgfx::RendererType::Count;
+    init.platformData.nwh  = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt  = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width  = (uint32_t)st-&gt;width;
+    init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset  = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x101020ff, 1.0f, 0);
+
+    st-&gt;layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float).end();
+    st-&gt;vbh      = bgfx::createVertexBuffer(bgfx::makeRef(kCube, sizeof(kCube)), st-&gt;layout);
+    st-&gt;ibh      = bgfx::createIndexBuffer (bgfx::makeRef(kCubeIdx, sizeof(kCubeIdx)));
+    st-&gt;program  = loadProgram("vs_skybox", "fs_skybox");
+    st-&gt;cubemap  = makeSkyCube();
+    st-&gt;s_skybox = bgfx::createUniform("s_skybox", bgfx::UniformType::Sampler);
+    if (!bgfx::isValid(st-&gt;program)) return fail("loadProgram");
+
+    st-&gt;startNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_MOUSE_MOTION &amp;&amp; (e-&gt;motion.state &amp; SDL_BUTTON_LMASK)) {
+        st-&gt;yaw   += e-&gt;motion.xrel * 0.005f;
+        st-&gt;pitch += e-&gt;motion.yrel * 0.005f;
+        st-&gt;pitch  = bx::clamp(st-&gt;pitch, -1.4f, 1.4f);
+    }
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+
+    bgfx::setViewRect(0, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+
+    // Look direction from yaw/pitch; the eye stays at the origin.
+    const bx::Vec3 eye = { 0.0f, 0.0f, 0.0f };
+    const bx::Vec3 at  = {
+        bx::cos(st-&gt;pitch) * bx::sin(st-&gt;yaw),
+        bx::sin(st-&gt;pitch),
+        bx::cos(st-&gt;pitch) * bx::cos(st-&gt;yaw),
+    };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    view[12] = view[13] = view[14] = 0.0f;     // rotation only — pin to the eye
+    bx::mtxProj(proj, 70.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 100.0f,
+                bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(0, view, proj);
+
+    bgfx::setVertexBuffer(0, st-&gt;vbh);
+    bgfx::setIndexBuffer(st-&gt;ibh);
+    bgfx::setTexture(0, st-&gt;s_skybox, st-&gt;cubemap);
+    // LEQUAL + no Z-write so the sky sits behind everything drawn after it.
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A
+                 | BGFX_STATE_DEPTH_TEST_LEQUAL);
+    bgfx::submit(0, st-&gt;program);
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (bgfx::isValid(st-&gt;s_skybox)) bgfx::destroy(st-&gt;s_skybox);
+    if (bgfx::isValid(st-&gt;cubemap))  bgfx::destroy(st-&gt;cubemap);
+    if (bgfx::isValid(st-&gt;ibh))      bgfx::destroy(st-&gt;ibh);
+    if (bgfx::isValid(st-&gt;vbh))      bgfx::destroy(st-&gt;vbh);
+    if (bgfx::isValid(st-&gt;program))  bgfx::destroy(st-&gt;program);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+    <div class="note">
+        <strong>Culling note.</strong> You're looking at the cube from the
+        <em>inside</em>, so the winding the GPU sees is reversed. The listing
+        leaves culling off (no <code>BGFX_STATE_CULL_*</code> bit), which always
+        works; if you'd rather cull, add <code>BGFX_STATE_CULL_CW</code> to draw
+        the inward-facing triangles, or flip the index winding.
+    </div>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Put a reflective object in the centre: draw a sphere or cube with normals, compute <code>vec3 r = reflect(normalize(v_worldPos - u_eye.xyz), normalize(v_normal));</code> in its fragment shader and sample the same cubemap with <code>r</code> — instant chrome.</li>
+        <li>Animate a day/night tint: pass a time-driven colour in a <code>u_skyTint</code> uniform and multiply it into <code>gl_FragColor</code>, dimming toward the <code>-Y</code> (down) face.</li>
+        <li>Swap in six real images: decode them with <code>bimg</code> (it ships with bgfx), copy their pixels into the six face slots in <code>+X,-X,+Y,-Y,+Z,-Z</code> order, and pass the block to <code>createTextureCube</code> unchanged.</li>
+        <li>Render the sky with a fullscreen pass instead of a cube: draw a clip-space triangle and reconstruct the view ray per pixel from the inverse view-projection — one fewer mesh, the same <code>textureCube</code> lookup.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="16-compute-shaders.html">← Prev: Compute Shaders</a>
+    <a href="index.html">Index</a>
+    <a href="18-normal-mapping.html">Next: Normal Mapping →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 17
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

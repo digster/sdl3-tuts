@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>18 · Sprite Rotation &amp; Flip — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>18. Sprite Rotation &amp; Flip</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 18 — Sprite Rotation &amp; Flip</h1>
+    <p class="tagline">
+        Spin a sprite about its centre, orbit it around an off-centre pivot, and
+        mirror it on either axis — all with one call,
+        <code>SDL_RenderTextureRotated</code>.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Rotating a texture with <code>SDL_RenderTextureRotated</code> and what each argument controls.</li>
+        <li>The angle convention: <strong>degrees, clockwise</strong> — not radians.</li>
+        <li>How the <code>center</code> pivot is measured relative to the destination rect, and how moving it turns spin into orbit.</li>
+        <li>Mirroring with <code>SDL_FlipMode</code> and combining flip with rotation.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="05-loading-textures.html">Recipe 05 — Loading Textures</a> for
+        creating and drawing a texture, and
+        <a href="04-delta-time.html">recipe 04</a> for the delta-time pattern
+        that drives the animation.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The rotated blit</h3>
+    <p>
+        Plain <code>SDL_RenderTexture</code> can only place an axis-aligned copy
+        of a texture. To rotate or mirror it, reach for the longer form:
+    </p>
+<pre><code class="language-cpp">bool SDL_RenderTextureRotated(
+    SDL_Renderer  *renderer,
+    SDL_Texture   *texture,
+    const SDL_FRect *src,     // sub-rect of the texture, or nullptr for all
+    const SDL_FRect *dst,     // where on screen (position + size)
+    double          angle,    // DEGREES, clockwise
+    const SDL_FPoint *center, // pivot, relative to dst's top-left; nullptr = centre
+    SDL_FlipMode    flip);    // NONE | HORIZONTAL | VERTICAL
+</code></pre>
+    <p>
+        Two things trip people up. First, <code>angle</code> is in
+        <strong>degrees</strong>, measured <strong>clockwise</strong> — the
+        opposite handedness from the radians most trig code produces. If your
+        physics works in radians, convert:
+        <code>deg = rad * 180.0 / SDL_PI_D</code>. Second, the pivot is given in
+        the destination rect's own coordinates, with <code>(0,0)</code> at the
+        top-left of <code>dst</code>.
+    </p>
+
+    <h3>Spinning about the centre</h3>
+    <p>
+        Pass <code>nullptr</code> for <code>center</code> and SDL pivots around
+        the middle of <code>dst</code> — the usual "spin in place". Drive the
+        angle off accumulated time so the rate is frame-rate independent, exactly
+        like the movement in recipe 04:
+    </p>
+<pre><code class="language-cpp">st-&gt;spin += dt * 90.0;          // 90 degrees per second
+SDL_FRect dst = { x - w/2, y - h/2, w, h };
+SDL_RenderTextureRotated(r, tex, nullptr, &amp;dst, st-&gt;spin, nullptr, SDL_FLIP_NONE);
+</code></pre>
+
+    <h3>Off-centre pivot — spin becomes orbit</h3>
+    <p>
+        Move the pivot away from the centre and the sprite swings <em>around</em>
+        that point instead of turning on the spot. Because <code>center</code> is
+        relative to the destination rect, a pivot at
+        <code>{ w*0.5f, h + 90 }</code> sits 90 pixels below the sprite — rotate
+        and the sprite orbits that lower point like a pendulum bob:
+    </p>
+<pre><code class="language-cpp">SDL_FPoint pivot = { w * 0.5f, h * 0.5f + orbit_radius };
+SDL_RenderTextureRotated(r, tex, nullptr, &amp;dst, st-&gt;spin, &amp;pivot, SDL_FLIP_NONE);
+</code></pre>
+    <p>
+        Push the pivot far enough outside the sprite's own bounds and you get a
+        wide orbit — handy for a moon circling a planet or a sword swung from the
+        hand.
+    </p>
+
+    <h3>Flipping</h3>
+    <p>
+        <code>SDL_FlipMode</code> mirrors the texture before it's drawn.
+        The three values are <code>SDL_FLIP_NONE</code>,
+        <code>SDL_FLIP_HORIZONTAL</code> (mirror left/right) and
+        <code>SDL_FLIP_VERTICAL</code> (mirror top/bottom). Flip is applied
+        <em>then</em> rotation, so you can freely combine the two — a
+        left-facing sprite flipped horizontally and rotated 30° still rotates
+        about the same pivot:
+    </p>
+<pre><code class="language-cpp">SDL_FlipMode flip = SDL_FLIP_NONE;
+if (key == SDL_SCANCODE_1) flip = SDL_FLIP_NONE;
+if (key == SDL_SCANCODE_2) flip = SDL_FLIP_HORIZONTAL;
+if (key == SDL_SCANCODE_3) flip = SDL_FLIP_VERTICAL;
+</code></pre>
+
+    <div class="note">
+        <strong>Degrees, and clockwise.</strong> A positive angle turns the
+        sprite <em>clockwise</em> on screen because SDL's y-axis points down. If
+        a rotation looks backwards, you're almost certainly feeding radians, or
+        expecting the maths-class counter-clockwise convention.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A procedurally-built arrow texture spins under delta time. Keys
+        <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> set the flip mode, and the pivot
+        offset eases in and out so the arrow drifts between spinning in place and
+        orbiting a point below it.
+    </p>
+<pre><code class="language-cpp">/*
+ * 18-sprite-transforms.cpp — SDL_RenderTextureRotated: spin, orbit, flip.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+struct AppState {
+    SDL_Window   *window   = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture  *arrow    = nullptr;
+    float  tw = 0, th = 0;
+    double spin = 0.0;                 // degrees
+    float  t    = 0.0f;                // seconds, drives the pivot ease
+    SDL_FlipMode flip = SDL_FLIP_NONE;
+    Uint64 last_ns = 0;
+};
+
+/* Build a 48x48 arrow pointing right, on a transparent background. */
+static SDL_Texture *make_arrow(SDL_Renderer *r)
+{
+    const int W = 48, H = 48;
+    SDL_Surface *s = SDL_CreateSurface(W, H, SDL_PIXELFORMAT_RGBA32);
+    if (!s) return nullptr;
+    const SDL_PixelFormatDetails *pfd = SDL_GetPixelFormatDetails(s-&gt;format);
+    Uint32 *px = static_cast&lt;Uint32 *&gt;(s-&gt;pixels);
+    int pitch = s-&gt;pitch / 4;
+
+    for (int y = 0; y &lt; H; ++y) {
+        for (int x = 0; x &lt; W; ++x) {
+            // Shaft: a horizontal bar; head: a triangle on the right.
+            bool shaft = (y &gt;= 18 &amp;&amp; y &lt; 30 &amp;&amp; x &lt; 32);
+            bool head  = (x &gt;= 28 &amp;&amp; x &lt; 44 &amp;&amp;
+                          SDL_abs(y - 24) &lt;= (44 - x));
+            Uint8 a = (shaft || head) ? 255 : 0;
+            px[y * pitch + x] = SDL_MapRGBA(pfd, nullptr, 120, 210, 255, a);
+        }
+    }
+    SDL_Texture *t = SDL_CreateTextureFromSurface(r, s);
+    SDL_DestroySurface(s);
+    return t;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Sprite Transforms", "1.0", "com.example.sdl3.transforms");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Sprite Transforms", 640, 480,
+                                     SDL_WINDOW_RESIZABLE, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    st-&gt;arrow = make_arrow(st-&gt;renderer);
+    if (!st-&gt;arrow) { SDL_Log("arrow: %s", SDL_GetError()); delete st; return SDL_APP_FAILURE; }
+    SDL_GetTextureSize(st-&gt;arrow, &amp;st-&gt;tw, &amp;st-&gt;th);
+
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        switch (e-&gt;key.scancode) {
+        case SDL_SCANCODE_ESCAPE: return SDL_APP_SUCCESS;
+        case SDL_SCANCODE_1: st-&gt;flip = SDL_FLIP_NONE;       break;
+        case SDL_SCANCODE_2: st-&gt;flip = SDL_FLIP_HORIZONTAL; break;
+        case SDL_SCANCODE_3: st-&gt;flip = SDL_FLIP_VERTICAL;   break;
+        default: break;
+        }
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    st-&gt;spin += dt * 90.0;             // 90 deg/s, clockwise
+    st-&gt;t    += dt;
+
+    gfx::clear(st-&gt;renderer, 18, 20, 30);
+
+    // Centre the sprite in the window.
+    int w = 640, h = 480;
+    SDL_GetRenderOutputSize(st-&gt;renderer, &amp;w, &amp;h);
+    SDL_FRect dst = { w * 0.5f - st-&gt;tw * 0.5f, h * 0.5f - st-&gt;th * 0.5f,
+                      st-&gt;tw, st-&gt;th };
+
+    // Ease the pivot from the sprite centre out to 110px below and back.
+    float ease = 0.5f - 0.5f * SDL_cosf(st-&gt;t * 0.8f);   // 0..1
+    SDL_FPoint pivot = { st-&gt;tw * 0.5f, st-&gt;th * 0.5f + ease * 110.0f };
+
+    SDL_RenderTextureRotated(st-&gt;renderer, st-&gt;arrow, nullptr, &amp;dst,
+                             st-&gt;spin, &amp;pivot, st-&gt;flip);
+
+    // Mark the pivot point so the orbit is visible.
+    gfx::set_color(st-&gt;renderer, 255, 90, 90, 255);
+    gfx::fill_rect(st-&gt;renderer, dst.x + pivot.x - 2, dst.y + pivot.y - 2, 4, 4);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        if (st-&gt;arrow) SDL_DestroyTexture(st-&gt;arrow);
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Make a wide orbit: fix the pivot far outside the sprite (say <code>{ tw*0.5f, th*0.5f + 200 }</code>) and watch the arrow sweep a big circle instead of pendulum-swinging.</li>
+        <li>Combine flip and rotation: hold a horizontal flip while spinning and confirm the mirror is applied before the rotation — the arrow still circles the same pivot.</li>
+        <li>Draw from a sub-rect of a sprite sheet (recipe 06): pass a <code>src</code> rect picking one frame and rotate just that frame, so an animated sprite can also turn.</li>
+        <li>Build a clock: two thin rectangle textures rotated about a shared centre at different rates — one a full turn per minute, one per hour.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="17-render-geometry.html">← 17. SDL_RenderGeometry Meshes</a>
+    <a href="index.html">Index</a>
+    <a href="19-fixed-timestep.html">Next: Fixed Timestep →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 18
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

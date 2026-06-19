@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>20 · Transient &amp; Dynamic Buffers — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>20. Transient &amp; Dynamic Buffers</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 20 — Transient &amp; Dynamic Buffers</h1>
+    <p class="tagline">
+        Geometry the CPU rewrites. A transient buffer for debug shapes rebuilt
+        every single frame, a dynamic buffer for data that changes now and then —
+        the two buffer lifetimes the static <code>createVertexBuffer</code> can't
+        cover.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>The three buffer lifetimes — <strong>static</strong>, <strong>dynamic</strong>, <strong>transient</strong> — and when each fits.</li>
+        <li>Allocating and filling a transient buffer with <code>allocTransientVertexBuffer</code> — valid for exactly one frame.</li>
+        <li>The <code>getAvailTransientVertexBuffer</code> guard before you allocate.</li>
+        <li>Creating a <code>DynamicVertexBuffer</code> and rewriting part of it with <code>bgfx::update</code>.</li>
+        <li>Drawing immediate-mode debug geometry — a grid plus an animated ribbon — with a plain coloured program.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        Static vertex and index buffers from
+        <a href="05-vertex-and-index-buffers.html">recipe 05</a> and the
+        transform pipeline from <a href="06-uniforms-and-transforms.html">recipe
+        06</a>. We reuse the <code>vs_colored</code> / <code>fs_colored</code>
+        shader style from the early recipes — position plus a packed colour.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Three lifetimes</h3>
+    <p>
+        Every recipe so far used <code>createVertexBuffer</code> — a
+        <strong>static</strong> buffer: upload once, draw forever, never touch
+        again. That's perfect for a mesh, and wrong for geometry the CPU keeps
+        changing. bgfx offers two more lifetimes:
+    </p>
+    <ul>
+        <li><strong>Static</strong> (<code>createVertexBuffer</code>) — immutable after upload. Cheapest to draw, can't be changed. Meshes, the cube, the ground.</li>
+        <li><strong>Dynamic</strong> (<code>createDynamicVertexBuffer</code>) — a persistent handle you rewrite with <code>bgfx::update</code> whenever the data actually changes. Good for geometry that's mostly stable but edited occasionally.</li>
+        <li><strong>Transient</strong> (<code>allocTransientVertexBuffer</code>) — scratch geometry valid for <em>one frame only</em>. You allocate, fill, submit, and it's gone next frame. Ideal for immediate-mode debug shapes, UI, or anything rebuilt from scratch every tick.</li>
+    </ul>
+
+    <h3>Filling a transient buffer</h3>
+    <p>
+        A transient buffer is carved from a per-frame scratch pool, so it can run
+        out under pressure — always reserve with
+        <code>getAvailTransientVertexBuffer</code> first. Then
+        <code>allocTransientVertexBuffer</code> hands you a struct whose
+        <code>data</code> pointer you write vertices straight into, no staging,
+        no <code>copy</code>.
+    </p>
+<pre><code class="language-cpp">struct PosColorVertex { float x, y, z; uint32_t abgr; };
+
+// Rebuild an animated ribbon into a transient buffer, every frame.
+const uint32_t kRibbon = 128;
+if (kRibbon == bgfx::getAvailTransientVertexBuffer(kRibbon, st-&gt;layout)) {
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::allocTransientVertexBuffer(&amp;tvb, kRibbon, st-&gt;layout);
+
+    PosColorVertex *v = (PosColorVertex *)tvb.data;   // write directly
+    for (uint32_t i = 0; i &lt; kRibbon; ++i) {
+        float u = float(i) / float(kRibbon - 1);
+        float x = -6.0f + 12.0f * u;
+        float y = 2.0f * bx::sin(u * 12.0f + t * 3.0f);
+        v[i] = { x, y, 0.0f, 0xff66ddff };
+    }
+    bgfx::setVertexBuffer(0, &amp;tvb);                    // note: &amp;tvb, not a handle
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_PT_LINESTRIP);
+    bgfx::submit(0, st-&gt;program);
+}
+</code></pre>
+    <div class="note">
+        <strong>One frame, then gone.</strong> You never <code>destroy</code> a
+        transient buffer — bgfx recycles the whole scratch pool at
+        <code>frame()</code>. Allocate it fresh inside <code>SDL_AppIterate</code>
+        every tick; holding the struct across frames is undefined.
+    </div>
+
+    <h3>A dynamic buffer you update on demand</h3>
+    <p>
+        The ground grid never moves, but we want to <em>be able</em> to change it
+        without recreating the buffer — so it's dynamic. Create it once at the
+        size you need (or hand it initial data), then call <code>bgfx::update</code>
+        only when something changes; in between, it draws exactly like a static
+        buffer.
+    </p>
+<pre><code class="language-cpp">// Create once, sized for the whole grid:
+st-&gt;grid = bgfx::createDynamicVertexBuffer(kGridVerts, st-&gt;layout);
+
+// Whenever the grid changes (here: once, at startup), push new vertices:
+const bgfx::Memory *mem = bgfx::copy(verts, kGridVerts * sizeof(PosColorVertex));
+bgfx::update(st-&gt;grid, 0 /*startVertex*/, mem);
+
+// Drawing is identical to a static buffer:
+bgfx::setVertexBuffer(0, st-&gt;grid);
+bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_PT_LINES);
+bgfx::submit(0, st-&gt;program);
+</code></pre>
+    <p>
+        The contrast is the whole lesson: the grid lives in a long-lived dynamic
+        buffer and is uploaded once; the ribbon is reborn into transient scratch
+        on every frame. Neither uses a static buffer, and neither needs a copy
+        pass or a transfer buffer — bgfx hides all of that.
+    </p>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        An immediate-mode debug overlay: a wireframe ground grid in a dynamic
+        buffer, and an animated line-strip "oscilloscope" ribbon rebuilt into a
+        transient buffer every frame. The native-handle / <code>loadProgram</code>
+        helpers are from recipe 03 (elided), and the shaders are recipe 05's
+        <code>vs_colored</code> / <code>fs_colored</code>.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/20-transient-and-dynamic-buffers.cpp — a dynamic grid + a transient
+ * ribbon, the two CPU-updated buffer lifetimes.
+ * Native-handle + loadProgram helpers identical to recipe 03 (elided).
+ * Shaders: vs_colored / fs_colored (recipe 05).
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+#include &lt;vector&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+
+struct PosColorVertex { float x, y, z; uint32_t abgr; };   // abgr: 0xAABBGGRR
+
+static const int kGridLines = 21;                          // -10..+10
+static const uint32_t kGridVerts = kGridLines * 2 * 2;     // two axes, 2 verts/line
+static const uint32_t kRibbon    = 128;
+
+struct AppState {
+    SDL_Window                     *window = nullptr;
+    int                             width = 1280, height = 720;
+    bgfx::VertexLayout              layout;
+    bgfx::DynamicVertexBufferHandle grid = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle             program = BGFX_INVALID_HANDLE;
+    Uint64                          startNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+// Fill a grid of lines in the XZ plane (y = 0). Used once to seed the dynamic buffer.
+static void buildGrid(std::vector&lt;PosColorVertex&gt; &amp;out) {
+    out.clear();
+    const uint32_t c = 0xff556070;                         // muted grey-blue
+    for (int i = 0; i &lt; kGridLines; ++i) {
+        float p = -10.0f + float(i);
+        out.push_back({ p, 0.0f, -10.0f, c });             // line along Z
+        out.push_back({ p, 0.0f,  10.0f, c });
+        out.push_back({ -10.0f, 0.0f, p, c });             // line along X
+        out.push_back({  10.0f, 0.0f, p, c });
+    }
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Transient/Dynamic", "1.0", "com.example.sdl3.bgfx.buffers");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Transient &amp; Dynamic Buffers", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type              = bgfx::RendererType::Count;
+    init.platformData.nwh  = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt  = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width  = (uint32_t)st-&gt;width;
+    init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset  = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x0a0e1aff, 1.0f, 0);
+
+    st-&gt;layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0,   4, bgfx::AttribType::Uint8, true).end();
+
+    // Dynamic grid: create once at full size, upload the lines a single time.
+    st-&gt;grid = bgfx::createDynamicVertexBuffer(kGridVerts, st-&gt;layout);
+    std::vector&lt;PosColorVertex&gt; gridVerts;
+    buildGrid(gridVerts);
+    bgfx::update(st-&gt;grid, 0, bgfx::copy(gridVerts.data(),
+                 uint32_t(gridVerts.size() * sizeof(PosColorVertex))));
+
+    st-&gt;program = loadProgram("vs_colored", "fs_colored");
+    if (!bgfx::isValid(st-&gt;program)) return fail("loadProgram");
+
+    st-&gt;startNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (float)(SDL_GetTicksNS() - st-&gt;startNs) / 1.0e9f;
+
+    bgfx::setViewRect(0, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+    const bx::Vec3 eye = { 0.0f, 9.0f, -16.0f }, at = { 0.0f, 1.0f, 0.0f };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 60.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 100.0f,
+                bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(0, view, proj);
+
+    float ident[16]; bx::mtxIdentity(ident);
+
+    // --- The dynamic grid: drawn straight from its persistent handle ---
+    bgfx::setTransform(ident);
+    bgfx::setVertexBuffer(0, st-&gt;grid);
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A
+                 | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_PT_LINES);
+    bgfx::submit(0, st-&gt;program);
+
+    // --- The transient ribbon: rebuilt from scratch this frame ---
+    if (kRibbon == bgfx::getAvailTransientVertexBuffer(kRibbon, st-&gt;layout)) {
+        bgfx::TransientVertexBuffer tvb;
+        bgfx::allocTransientVertexBuffer(&amp;tvb, kRibbon, st-&gt;layout);
+        PosColorVertex *v = (PosColorVertex *)tvb.data;
+        for (uint32_t i = 0; i &lt; kRibbon; ++i) {
+            float u = float(i) / float(kRibbon - 1);
+            float x = -10.0f + 20.0f * u;
+            float y = 1.5f + 2.0f * bx::sin(u * 12.0f + t * 3.0f)
+                           * bx::cos(u * 3.0f - t);
+            // Hue ramps along the ribbon so the sweep is easy to read.
+            uint8_t r = (uint8_t)(120 + 120 * bx::sin(u * 6.2831f));
+            uint32_t abgr = 0xff000000u | (uint32_t(0xdd) &lt;&lt; 16) | (uint32_t(0xaa) &lt;&lt; 8) | r;
+            v[i] = { x, y, 0.0f, abgr };
+        }
+        bgfx::setTransform(ident);
+        bgfx::setVertexBuffer(0, &amp;tvb);
+        bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A
+                     | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_PT_LINESTRIP);
+        bgfx::submit(0, st-&gt;program);
+    }
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (bgfx::isValid(st-&gt;grid))    bgfx::destroy(st-&gt;grid);   // dynamic: we own it
+    if (bgfx::isValid(st-&gt;program)) bgfx::destroy(st-&gt;program);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+    <div class="note">
+        <strong>No static buffer here.</strong> The grid is dynamic and the ribbon
+        is transient, so neither is a <code>createVertexBuffer</code>. The ribbon
+        in particular never lives past <code>frame()</code> — and there's nothing
+        to free for it, which is exactly why transient buffers are the right tool
+        for throwaway, rebuilt-every-frame geometry.
+    </div>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Turn the ribbon into a CPU particle trail: keep a ring buffer of recent positions on the CPU and dump it into the transient buffer each frame — the same allocate-fill-submit, now driven by simulated points.</li>
+        <li>Make the grid genuinely dynamic: animate one axis's lines and push them with <code>bgfx::update</code> only on the frames they change. Confirm it draws free on the other frames.</li>
+        <li>Add the <code>getAvail</code> fallback path: when the guard fails, draw a smaller ribbon (whatever <code>getAvailTransientVertexBuffer</code> reports) instead of skipping it — graceful degradation under scratch pressure.</li>
+        <li>Draw thousands of debug lines: bump <code>kRibbon</code> hard, or stack many ribbons, and watch the frame stay cheap — per-frame transient geometry is built for exactly this.</li>
+    </ol>
+    <p>
+        And that's the bgfx track. You started by
+        <a href="01-hello-bgfx.html">handing SDL3's native window handle to
+        bgfx</a> — the one trick the 2D and 3D tracks never need — then climbed
+        through shaders, buffers and transforms; textures, views and instancing;
+        the lit, textured <a href="12-capstone-scene.html">capstone</a>; mesh
+        loading, mouse picking, post-processing and GPU compute; and finally
+        skybox cubemaps, normal and shadow mapping, and these transient and
+        dynamic buffers. The same four SDL3 callbacks carried every one of them.
+        Head back to the <a href="../index.html">track picker</a> to see how the
+        same ideas land in SDL_Renderer and SDL_GPU — three renderers, one window,
+        your choice.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="19-shadow-mapping.html">← Prev: Shadow Mapping</a>
+    <a href="index.html">Index</a>
+    <a href="../index.html">All tracks →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 20
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>
