@@ -303,17 +303,19 @@ void main() { gl_FragColor = v_color0; }
         <li>Double-buffer the particles (read one, write the other, swap) if you add neighbour interactions that must read a consistent previous state.</li>
     </ol>
     <p>
-        That's the bgfx track: from <a href="01-hello-bgfx.html">handing SDL3's
-        window to bgfx</a> all the way to the GPU simulating and drawing its own
-        geometry. Head back to the <a href="../index.html">track picker</a> to
-        compare how the same ideas land in SDL_Renderer and SDL_GPU.
+        Compute rounds out the core pipeline — the final recipes bring bgfx up to
+        the 3D track's <a href="17-skybox-and-cubemaps.html">skybox</a>,
+        <a href="18-normal-mapping.html">normal-</a> and
+        <a href="19-shadow-mapping.html">shadow-mapping</a>, plus the
+        <a href="20-transient-and-dynamic-buffers.html">transient and dynamic
+        buffers</a> that round out bgfx's own buffer story.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="15-post-processing-and-bloom.html">← Prev: Post-Processing &amp; Bloom</a>
     <a href="index.html">Index</a>
-    <a href="../index.html">All tracks →</a>
+    <a href="17-skybox-and-cubemaps.html">Next: Skybox &amp; Cubemaps →</a>
 </nav>
 
 </main>

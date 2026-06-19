@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SDL3 Recipes — 2D, 3D & bgfx Game Tutorials in C++</title>
-    <meta name="description" content="A progressive, callback-style C++ curriculum for SDL3: 16 recipes for 2D games (SDL_Renderer), 17 for 3D graphics (SDL_GPU) with cross-platform shaders via SDL_shadercross, and 16 for the bgfx renderer (Metal/Vulkan/D3D behind one API). Beginner to advanced.">
+    <meta name="description" content="A progressive, callback-style C++ curriculum for SDL3: 20 recipes for 2D games (SDL_Renderer), 21 for 3D graphics (SDL_GPU) with cross-platform shaders via SDL_shadercross, and 20 for the bgfx renderer (Metal/Vulkan/D3D behind one API). Beginner to advanced.">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,9 +18,9 @@
 <header class="hero">
     <h1>SDL3 Recipes</h1>
     <p class="lede">
-        A progressive, callback-style C++ curriculum for SDL3 — sixteen recipes for
-        2D games, seventeen for 3D graphics (cross-platform shaders, skyboxes,
-        shadows and GPU compute), and sixteen for driving the
+        A progressive, callback-style C++ curriculum for SDL3 — twenty recipes for
+        2D games, twenty-one for 3D graphics (cross-platform shaders, skyboxes,
+        shadows and GPU compute), and twenty for driving the
         <a href="https://github.com/bkaradzic/bgfx">bgfx</a> renderer, ordered
         beginner to advanced. Every snippet uses the same
         <code>SDL_AppInit</code> / <code>SDL_AppEvent</code> /
@@ -34,7 +34,7 @@
     <div class="track-cards">
 
         <a class="card" href="2d/index.html">
-            <div class="meta">16 recipes · SDL_Renderer</div>
+            <div class="meta">20 recipes · SDL_Renderer</div>
             <h2>2D Track</h2>
             <p>
                 Open a window, draw shapes, load textures, animate sprites, detect
@@ -45,7 +45,7 @@
         </a>
 
         <a class="card" href="3d/index.html">
-            <div class="meta">17 recipes · SDL_GPU + SDL_shadercross</div>
+            <div class="meta">21 recipes · SDL_GPU + SDL_shadercross</div>
             <h2>3D Track</h2>
             <p>
                 Drop one tier below SDL_Renderer to SDL_GPU — Metal / Vulkan /
@@ -57,7 +57,7 @@
         </a>
 
         <a class="card" href="bgfx/index.html">
-            <div class="meta">16 recipes · bgfx + shaderc</div>
+            <div class="meta">20 recipes · bgfx + shaderc</div>
             <h2>bgfx Track</h2>
             <p>
                 Step outside SDL for the rendering: wire SDL3's native window
@@ -126,7 +126,9 @@
         Movement · Loading Textures · Sprite Animation · Collision Detection ·
         Audio Basics · Text Rendering · Tilemap Rendering · Particle Systems ·
         Mini Game: Pong · Gamepad Input · Music &amp; Mixing · Save/Load &amp;
-        Simple UI · Render Targets &amp; Screen Effects.
+        Simple UI · Render Targets &amp; Screen Effects · SDL_RenderGeometry
+        Meshes · Sprite Rotation &amp; Flip · Fixed Timestep · Blend Modes &amp;
+        2D Lighting.
     </p>
     <h3>3D — <code>SDL_GPU</code></h3>
     <p>
@@ -134,7 +136,9 @@
         &amp; Quads · Uniforms &amp; the MVP Matrix · The 3D Cube · Depth
         Testing · Textures &amp; Samplers · Phong Lighting · Multiple Objects ·
         FPS Camera · Render-to-Texture · Shadercross in Practice · Skybox &amp;
-        Cubemaps · Normal Mapping · Shadow Mapping · Compute Shaders.
+        Cubemaps · Normal Mapping · Shadow Mapping · Compute Shaders · Instanced
+        Rendering · Post-Processing &amp; Bloom · Alpha Blending &amp; Transparency
+        · Mipmaps &amp; MSAA.
     </p>
     <h3>bgfx — <code>bgfx</code> + <code>shaderc</code></h3>
     <p>
@@ -143,7 +147,8 @@
         The Spinning Cube · Depth &amp; Render State · Textures &amp; Samplers ·
         Views &amp; Render-to-Texture · Instancing · Capstone: Lit, Textured,
         Instanced Scene · Loading a Mesh · Mouse Picking · Post-Processing &amp;
-        Bloom · Compute Shaders.
+        Bloom · Compute Shaders · Skybox &amp; Cubemaps · Normal Mapping · Shadow
+        Mapping · Transient &amp; Dynamic Buffers.
     </p>
 </section>
 

@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>19 · Post-Processing &amp; Bloom — 3D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">3D Track</a> ›
+    <span>19. Post-Processing &amp; Bloom</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 19 — Post-Processing &amp; Bloom</h1>
+    <p class="tagline">
+        Make bright things glow. Render the scene offscreen, isolate the bright
+        pixels, blur them with a cheap separable Gaussian, and add the result
+        back over the scene. A four-pass pipeline built entirely on
+        render-to-texture.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Chaining several offscreen colour targets and ping-ponging between them.</li>
+        <li>A bright-pass (threshold) that keeps only the pixels worth glowing.</li>
+        <li>Why a separable Gaussian (horizontal then vertical) is so much cheaper than a 2D one.</li>
+        <li>An additive composite that adds the blurred bloom back onto the scene.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="12-render-to-texture.html">Recipe 12 — Render-to-Texture</a>.
+        Everything here is that two-pass pattern repeated: each post step is a
+        fullscreen-triangle draw that samples one target and writes another. The
+        fullscreen-triangle vertex shader is reused verbatim.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Bloom in four passes</h3>
+    <ol>
+        <li><strong>Scene → target A.</strong> Draw a bright emissive cube on a dark background into an offscreen colour target.</li>
+        <li><strong>Bright-pass A → B.</strong> A fullscreen triangle keeps pixels above a luminance threshold and zeroes the rest.</li>
+        <li><strong>Blur B → C → B.</strong> A separable Gaussian: horizontal pass <code>B→C</code>, then vertical pass <code>C→B</code>. A <code>direction</code> uniform picks the axis.</li>
+        <li><strong>Composite → swapchain.</strong> Sample the original scene (A) plus the blurred bloom (B), add them, present.</li>
+    </ol>
+
+    <h3>The targets</h3>
+    <p>
+        Three sampleable colour targets, all created with the recipe-12
+        <code>create_color_target</code> helper. The scene target A is full
+        resolution; the bright/blur targets B and C are half resolution — the
+        blur is the most expensive part and a wide glow doesn't need full
+        detail. Half-res also doubles the effective blur radius for free.
+    </p>
+<pre><code class="language-cpp">st-&gt;sceneA  = create_color_target(dev, w,   h,   fmt);   // full-res scene
+st-&gt;brightB = create_color_target(dev, w/2, h/2, fmt);  // half-res bright + final blur
+st-&gt;blurC   = create_color_target(dev, w/2, h/2, fmt);  // half-res scratch
+st-&gt;sceneDepth = create_depth(dev, w, h);               // only the scene pass needs depth
+</code></pre>
+
+    <h3>The fullscreen triangle (reused)</h3>
+    <p>
+        Identical to recipe 12: three vertices generated from
+        <code>[[vertex_id]]</code>, UVs computed in the shader, no vertex buffer.
+        Every post pass reuses it.
+    </p>
+<pre><code class="language-cpp">static const char *kPostVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+vertex VSOut postVS(uint vid [[vertex_id]]) {
+    const float2 P[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };
+    VSOut o; o.position = float4(P[vid], 0, 1);
+    o.uv = P[vid] * 0.5 + 0.5; o.uv.y = 1.0 - o.uv.y;
+    return o;
+}
+)msl";
+</code></pre>
+
+    <h3>Pass 2 — bright-pass</h3>
+    <p>
+        Compute a luminance and keep the pixel only if it clears the threshold;
+        otherwise output black. After this pass, target B holds just the glowing
+        bits.
+    </p>
+<pre><code class="language-cpp">static const char *kBrightFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+struct Bright { float threshold; float pad0, pad1, pad2; };
+fragment float4 brightFS(VSOut in [[stage_in]],
+                         texture2d&lt;float&gt; scene [[texture(0)]],
+                         sampler smp [[sampler(0)]],
+                         constant Bright &amp;u [[buffer(0)]]) {
+    float3 c = scene.sample(smp, in.uv).rgb;
+    float lum = dot(c, float3(0.2126, 0.7152, 0.0722));
+    return float4(lum &gt; u.threshold ? c : float3(0.0), 1.0);
+}
+)msl";
+</code></pre>
+
+    <h3>Pass 3 — separable Gaussian blur</h3>
+    <p>
+        A full 2D Gaussian over an N×N window costs N² taps per pixel. A
+        <strong>separable</strong> Gaussian splits it into two 1D passes — N taps
+        horizontally, then N taps vertically — which is mathematically identical
+        but costs 2N taps. The <code>direction</code> uniform is
+        <code>(texelW, 0)</code> for the horizontal pass and
+        <code>(0, texelH)</code> for the vertical one, so the same shader does
+        both.
+    </p>
+<pre><code class="language-cpp">static const char *kBlurFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+struct Blur { float2 direction; float2 pad; };   // texel-sized step along one axis
+fragment float4 blurFS(VSOut in [[stage_in]],
+                       texture2d&lt;float&gt; src [[texture(0)]],
+                       sampler smp [[sampler(0)]],
+                       constant Blur &amp;u [[buffer(0)]]) {
+    // 9-tap Gaussian (normalised weights).
+    const float w[5] = { 0.227027, 0.194594, 0.121622, 0.054054, 0.016216 };
+    float3 sum = src.sample(smp, in.uv).rgb * w[0];
+    for (int i = 1; i &lt; 5; ++i) {
+        float2 off = u.direction * float(i);
+        sum += src.sample(smp, in.uv + off).rgb * w[i];
+        sum += src.sample(smp, in.uv - off).rgb * w[i];
+    }
+    return float4(sum, 1.0);
+}
+)msl";
+</code></pre>
+
+    <h3>Pass 4 — additive composite</h3>
+    <p>
+        Sample the untouched scene (A) and the blurred bloom (B), and add the
+        bloom scaled by an <code>intensity</code>. Because the scene and bloom
+        are two different textures, this pass binds <strong>two</strong>
+        fragment samplers.
+    </p>
+<pre><code class="language-cpp">static const char *kCompositeFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+struct Comp { float intensity; float pad0, pad1, pad2; };
+fragment float4 compositeFS(VSOut in [[stage_in]],
+                            texture2d&lt;float&gt; scene [[texture(0)]],
+                            sampler        smpS  [[sampler(0)]],
+                            texture2d&lt;float&gt; bloom [[texture(1)]],
+                            sampler        smpB  [[sampler(1)]],
+                            constant Comp  &amp;u    [[buffer(0)]]) {
+    float3 c = scene.sample(smpS, in.uv).rgb;
+    float3 b = bloom.sample(smpB, in.uv).rgb;
+    return float4(c + b * u.intensity, 1.0);   // additive
+}
+)msl";
+</code></pre>
+
+    <h3>Driving the four passes</h3>
+    <p>
+        One command buffer, four render passes. The first draws the cube; the
+        next three are each a single fullscreen-triangle draw with the right
+        input bound. Note the blur runs twice with different
+        <code>direction</code> uniforms and swapped source/target.
+    </p>
+<pre><code class="language-cpp">// Pass 3a: horizontal blur, B -&gt; C
+SDL_GPURenderPass *p3 = SDL_BeginGPURenderPass(cmd, &amp;to_C, 1, nullptr);
+SDL_BindGPUGraphicsPipeline(p3, st-&gt;blur_pipeline);
+SDL_GPUTextureSamplerBinding sb{}; sb.texture=st-&gt;brightB; sb.sampler=st-&gt;sampler;
+SDL_BindGPUFragmentSamplers(p3, 0, &amp;sb, 1);
+struct { float dir[2], pad[2]; } hb{ { 1.0f/(st-&gt;fb_w*0.5f), 0.0f }, {0,0} };
+SDL_PushGPUFragmentUniformData(cmd, 0, &amp;hb, sizeof(hb));
+SDL_DrawGPUPrimitives(p3, 3, 1, 0, 0);
+SDL_EndGPURenderPass(p3);
+// Pass 3b: vertical blur, C -&gt; B  (same pipeline, direction = (0, texelH))
+</code></pre>
+
+    <div class="note">
+        <strong>Why this matters.</strong> Bloom is the canonical
+        multi-pass post-process: threshold, blur, composite. Swap the bright-pass
+        for a luminance histogram and you have auto-exposure; swap the blur for a
+        depth-weighted one and you have depth-of-field. The plumbing — chain
+        targets, ping-pong, composite — is what generalises.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A bright emissive cube on a near-black background, glowing through a
+        half-resolution separable-Gaussian bloom that is added back over the
+        scene before presentation.
+    </p>
+<pre><code class="language-cpp">/*
+ * 19-post-processing-bloom.cpp — four-pass bloom: scene -&gt; bright-pass -&gt;
+ * separable Gaussian blur (H then V) -&gt; additive composite to the swapchain.
+ * Built on the render-to-texture pattern from recipe 12.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+
+#include &lt;cstring&gt;
+#include &lt;cstddef&gt;
+
+struct Vertex { float x, y, z, r, g, b, a; };
+// Emissive cube — colours pushed well above 1.0 so the bright-pass catches it.
+static const Vertex kCube[24] = {
+    {  0.5f,-0.5f,-0.5f, 2.0f,1.4f,0.3f,1 },{  0.5f, 0.5f,-0.5f, 2.0f,1.4f,0.3f,1 },{  0.5f, 0.5f, 0.5f, 2.0f,1.4f,0.3f,1 },{  0.5f,-0.5f, 0.5f, 2.0f,1.4f,0.3f,1 },
+    { -0.5f,-0.5f, 0.5f, 0.3f,1.6f,2.0f,1 },{ -0.5f, 0.5f, 0.5f, 0.3f,1.6f,2.0f,1 },{ -0.5f, 0.5f,-0.5f, 0.3f,1.6f,2.0f,1 },{ -0.5f,-0.5f,-0.5f, 0.3f,1.6f,2.0f,1 },
+    { -0.5f, 0.5f,-0.5f, 1.8f,0.4f,1.8f,1 },{ -0.5f, 0.5f, 0.5f, 1.8f,0.4f,1.8f,1 },{  0.5f, 0.5f, 0.5f, 1.8f,0.4f,1.8f,1 },{  0.5f, 0.5f,-0.5f, 1.8f,0.4f,1.8f,1 },
+    { -0.5f,-0.5f, 0.5f, 0.4f,2.0f,0.6f,1 },{ -0.5f,-0.5f,-0.5f, 0.4f,2.0f,0.6f,1 },{  0.5f,-0.5f,-0.5f, 0.4f,2.0f,0.6f,1 },{  0.5f,-0.5f, 0.5f, 0.4f,2.0f,0.6f,1 },
+    { -0.5f,-0.5f, 0.5f, 0.3f,0.6f,2.0f,1 },{  0.5f,-0.5f, 0.5f, 0.3f,0.6f,2.0f,1 },{  0.5f, 0.5f, 0.5f, 0.3f,0.6f,2.0f,1 },{ -0.5f, 0.5f, 0.5f, 0.3f,0.6f,2.0f,1 },
+    {  0.5f,-0.5f,-0.5f, 2.0f,0.5f,0.5f,1 },{ -0.5f,-0.5f,-0.5f, 2.0f,0.5f,0.5f,1 },{ -0.5f, 0.5f,-0.5f, 2.0f,0.5f,0.5f,1 },{  0.5f, 0.5f,-0.5f, 2.0f,0.5f,0.5f,1 },
+};
+static const Uint16 kIdx[36] = {
+    0,1,2, 4,5,6, 8,9,10, 12,13,14, 16,17,18, 20,21,22,
+    0,2,3, 4,6,7, 8,10,11, 12,14,15, 16,18,19, 20,22,23,
+};
+
+struct Mat4 { float m[16]; };
+static Mat4 mat4_identity(){ Mat4 r{}; r.m[0]=r.m[5]=r.m[10]=r.m[15]=1; return r; }
+static Mat4 mat4_translate(float x,float y,float z){ Mat4 r=mat4_identity(); r.m[12]=x;r.m[13]=y;r.m[14]=z; return r;}
+static Mat4 mat4_rotate_y(float a){ float c=SDL_cosf(a),s=SDL_sinf(a); Mat4 r=mat4_identity(); r.m[0]=c;r.m[2]=-s;r.m[8]=s;r.m[10]=c; return r;}
+static Mat4 mat4_rotate_x(float a){ float c=SDL_cosf(a),s=SDL_sinf(a); Mat4 r=mat4_identity(); r.m[5]=c;r.m[6]=s;r.m[9]=-s;r.m[10]=c; return r;}
+static Mat4 mat4_perspective(float fovy,float aspect,float n,float f){ float t=1/SDL_tanf(fovy*0.5f); Mat4 r{}; r.m[0]=t/aspect; r.m[5]=t; r.m[10]=f/(n-f); r.m[11]=-1; r.m[14]=(n*f)/(n-f); return r;}
+static Mat4 mat4_mul(const Mat4 &amp;a,const Mat4 &amp;b){ Mat4 r{}; for(int c=0;c&lt;4;++c) for(int row=0;row&lt;4;++row){ float s=0; for(int k=0;k&lt;4;++k) s+=a.m[k*4+row]*b.m[c*4+k]; r.m[c*4+row]=s; } return r;}
+
+static const char *kSceneVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSIn  { float3 pos [[attribute(0)]]; float4 color [[attribute(1)]]; };
+struct VSOut { float4 position [[position]]; float4 color; };
+struct UBO   { float4x4 mvp; };
+vertex VSOut sceneVS(VSIn in [[stage_in]], constant UBO &amp;u [[buffer(0)]]) {
+    VSOut o; o.position = u.mvp * float4(in.pos, 1.0); o.color = in.color; return o;
+}
+)msl";
+static const char *kSceneFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float4 color; };
+fragment float4 sceneFS(VSOut in [[stage_in]]) { return in.color; }
+)msl";
+
+static const char *kPostVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+vertex VSOut postVS(uint vid [[vertex_id]]) {
+    const float2 P[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };
+    VSOut o; o.position = float4(P[vid], 0, 1);
+    o.uv = P[vid] * 0.5 + 0.5; o.uv.y = 1.0 - o.uv.y;
+    return o;
+}
+)msl";
+static const char *kBrightFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+struct Bright { float threshold; float pad0, pad1, pad2; };
+fragment float4 brightFS(VSOut in [[stage_in]],
+                         texture2d&lt;float&gt; scene [[texture(0)]],
+                         sampler smp [[sampler(0)]],
+                         constant Bright &amp;u [[buffer(0)]]) {
+    float3 c = scene.sample(smp, in.uv).rgb;
+    float lum = dot(c, float3(0.2126, 0.7152, 0.0722));
+    return float4(lum &gt; u.threshold ? c : float3(0.0), 1.0);
+}
+)msl";
+static const char *kBlurFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+struct Blur { float2 direction; float2 pad; };
+fragment float4 blurFS(VSOut in [[stage_in]],
+                       texture2d&lt;float&gt; src [[texture(0)]],
+                       sampler smp [[sampler(0)]],
+                       constant Blur &amp;u [[buffer(0)]]) {
+    const float w[5] = { 0.227027, 0.194594, 0.121622, 0.054054, 0.016216 };
+    float3 sum = src.sample(smp, in.uv).rgb * w[0];
+    for (int i = 1; i &lt; 5; ++i) {
+        float2 off = u.direction * float(i);
+        sum += src.sample(smp, in.uv + off).rgb * w[i];
+        sum += src.sample(smp, in.uv - off).rgb * w[i];
+    }
+    return float4(sum, 1.0);
+}
+)msl";
+static const char *kCompositeFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float2 uv; };
+struct Comp { float intensity; float pad0, pad1, pad2; };
+fragment float4 compositeFS(VSOut in [[stage_in]],
+                            texture2d&lt;float&gt; scene [[texture(0)]],
+                            sampler        smpS  [[sampler(0)]],
+                            texture2d&lt;float&gt; bloom [[texture(1)]],
+                            sampler        smpB  [[sampler(1)]],
+                            constant Comp  &amp;u    [[buffer(0)]]) {
+    float3 c = scene.sample(smpS, in.uv).rgb;
+    float3 b = bloom.sample(smpB, in.uv).rgb;
+    return float4(c + b * u.intensity, 1.0);
+}
+)msl";
+
+// The scene target needs a high-range format so emissive colours survive &gt;1.0.
+static const SDL_GPUTextureFormat kHDR = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+
+struct AppState {
+    SDL_Window *window=nullptr; SDL_GPUDevice *device=nullptr;
+    SDL_GPUGraphicsPipeline *scene_pipeline=nullptr;
+    SDL_GPUGraphicsPipeline *bright_pipeline=nullptr;
+    SDL_GPUGraphicsPipeline *blur_pipeline=nullptr;
+    SDL_GPUGraphicsPipeline *composite_pipeline=nullptr;
+    SDL_GPUBuffer *vbuf=nullptr, *ibuf=nullptr;
+    SDL_GPUTexture *sceneA=nullptr, *brightB=nullptr, *blurC=nullptr, *sceneDepth=nullptr;
+    SDL_GPUSampler *sampler=nullptr;
+    Uint32 fb_w=0, fb_h=0;
+    Uint64 start_ns=0;
+};
+
+static SDL_AppResult fail(const char *w){ SDL_Log("%s: %s", w, SDL_GetError()); return SDL_APP_FAILURE; }
+static SDL_GPUShader *make_shader(SDL_GPUDevice *d, const char *src, SDL_GPUShaderStage s, const char *e,
+                                  Uint32 ubo, Uint32 samplers){
+    SDL_GPUShaderCreateInfo i{}; i.code=(const Uint8*)src; i.code_size=std::strlen(src);
+    i.entrypoint=e; i.format=SDL_GPU_SHADERFORMAT_MSL; i.stage=s;
+    i.num_uniform_buffers=ubo; i.num_samplers=samplers;
+    return SDL_CreateGPUShader(d, &amp;i);
+}
+static bool upload_buffer(SDL_GPUDevice *dev, SDL_GPUBuffer *dst, const void *src, Uint32 size){
+    SDL_GPUTransferBufferCreateInfo tbi{}; tbi.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD; tbi.size=size;
+    SDL_GPUTransferBuffer *tb=SDL_CreateGPUTransferBuffer(dev,&amp;tbi);
+    void *m=SDL_MapGPUTransferBuffer(dev,tb,false); std::memcpy(m,src,size); SDL_UnmapGPUTransferBuffer(dev,tb);
+    SDL_GPUCommandBuffer *cmd=SDL_AcquireGPUCommandBuffer(dev);
+    SDL_GPUCopyPass *cp=SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation s{}; s.transfer_buffer=tb;
+    SDL_GPUBufferRegion r{}; r.buffer=dst; r.size=size;
+    SDL_UploadToGPUBuffer(cp,&amp;s,&amp;r,false);
+    SDL_EndGPUCopyPass(cp); SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(dev,tb); return true;
+}
+static SDL_GPUTexture *create_color_target(SDL_GPUDevice *dev, Uint32 w, Uint32 h, SDL_GPUTextureFormat fmt){
+    SDL_GPUTextureCreateInfo ti{}; ti.type=SDL_GPU_TEXTURETYPE_2D; ti.format=fmt;
+    ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    ti.width=w; ti.height=h; ti.layer_count_or_depth=1; ti.num_levels=1; ti.sample_count=SDL_GPU_SAMPLECOUNT_1;
+    return SDL_CreateGPUTexture(dev,&amp;ti);
+}
+static SDL_GPUTexture *create_depth(SDL_GPUDevice *dev, Uint32 w, Uint32 h){
+    SDL_GPUTextureCreateInfo ti{}; ti.type=SDL_GPU_TEXTURETYPE_2D;
+    ti.format=SDL_GPU_TEXTUREFORMAT_D32_FLOAT; ti.usage=SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    ti.width=w; ti.height=h; ti.layer_count_or_depth=1; ti.num_levels=1; ti.sample_count=SDL_GPU_SAMPLECOUNT_1;
+    return SDL_CreateGPUTexture(dev,&amp;ti);
+}
+
+// Build a single fullscreen-post pipeline given its fragment shader + target format.
+static SDL_GPUGraphicsPipeline *make_post_pipeline(SDL_GPUDevice *dev, const char *fs_src, const char *fs_entry,
+                                                   Uint32 num_samplers, Uint32 num_ubo, SDL_GPUTextureFormat fmt){
+    SDL_GPUShader *vs = make_shader(dev, kPostVS, SDL_GPU_SHADERSTAGE_VERTEX, "postVS", 0, 0);
+    SDL_GPUShader *fs = make_shader(dev, fs_src,  SDL_GPU_SHADERSTAGE_FRAGMENT, fs_entry, num_ubo, num_samplers);
+    SDL_GPUColorTargetDescription ct{}; ct.format = fmt;
+    SDL_GPUGraphicsPipelineCreateInfo pci{};
+    pci.vertex_shader=vs; pci.fragment_shader=fs;
+    pci.primitive_type=SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pci.target_info.color_target_descriptions=&amp;ct;
+    pci.target_info.num_color_targets=1;
+    SDL_GPUGraphicsPipeline *p = SDL_CreateGPUGraphicsPipeline(dev, &amp;pci);
+    SDL_ReleaseGPUShader(dev, vs); SDL_ReleaseGPUShader(dev, fs);
+    return p;
+}
+
+static void resize_targets(AppState *st, Uint32 w, Uint32 h)
+{
+    if (st-&gt;sceneA)     SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;sceneA);
+    if (st-&gt;brightB)    SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;brightB);
+    if (st-&gt;blurC)      SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;blurC);
+    if (st-&gt;sceneDepth) SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;sceneDepth);
+    st-&gt;sceneA     = create_color_target(st-&gt;device, w,   h,   kHDR);
+    st-&gt;brightB    = create_color_target(st-&gt;device, w/2, h/2, kHDR);
+    st-&gt;blurC      = create_color_target(st-&gt;device, w/2, h/2, kHDR);
+    st-&gt;sceneDepth = create_depth       (st-&gt;device, w,   h);
+    st-&gt;fb_w = w; st-&gt;fb_h = h;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Post-Processing &amp; Bloom", "1.0", "com.example.sdl3.bloom");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, true, nullptr);
+    st-&gt;window = SDL_CreateWindow("Post-Processing &amp; Bloom", 800, 600, SDL_WINDOW_RESIZABLE);
+    SDL_ClaimWindowForGPUDevice(st-&gt;device, st-&gt;window);
+
+    SDL_GPUBufferCreateInfo vbi{}; vbi.usage=SDL_GPU_BUFFERUSAGE_VERTEX; vbi.size=sizeof(kCube);
+    st-&gt;vbuf=SDL_CreateGPUBuffer(st-&gt;device,&amp;vbi);
+    SDL_GPUBufferCreateInfo ibi{}; ibi.usage=SDL_GPU_BUFFERUSAGE_INDEX;  ibi.size=sizeof(kIdx);
+    st-&gt;ibuf=SDL_CreateGPUBuffer(st-&gt;device,&amp;ibi);
+    upload_buffer(st-&gt;device, st-&gt;vbuf, kCube, sizeof(kCube));
+    upload_buffer(st-&gt;device, st-&gt;ibuf, kIdx,  sizeof(kIdx));
+
+    SDL_GPUSamplerCreateInfo si{}; si.min_filter=SDL_GPU_FILTER_LINEAR; si.mag_filter=SDL_GPU_FILTER_LINEAR;
+    si.address_mode_u=SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    si.address_mode_v=SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    st-&gt;sampler = SDL_CreateGPUSampler(st-&gt;device, &amp;si);
+
+    // --- scene pipeline (offscreen, HDR target, depth tested) ---
+    SDL_GPUShader *svs = make_shader(st-&gt;device, kSceneVS, SDL_GPU_SHADERSTAGE_VERTEX,   "sceneVS", 1, 0);
+    SDL_GPUShader *sfs = make_shader(st-&gt;device, kSceneFS, SDL_GPU_SHADERSTAGE_FRAGMENT, "sceneFS", 0, 0);
+    SDL_GPUVertexBufferDescription svb{}; svb.slot=0; svb.pitch=sizeof(Vertex); svb.input_rate=SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    SDL_GPUVertexAttribute sattrs[2]{};
+    sattrs[0].location=0; sattrs[0].buffer_slot=0; sattrs[0].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; sattrs[0].offset=offsetof(Vertex,x);
+    sattrs[1].location=1; sattrs[1].buffer_slot=0; sattrs[1].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4; sattrs[1].offset=offsetof(Vertex,r);
+    SDL_GPUVertexInputState svis{}; svis.vertex_buffer_descriptions=&amp;svb; svis.num_vertex_buffers=1; svis.vertex_attributes=sattrs; svis.num_vertex_attributes=2;
+    SDL_GPUColorTargetDescription sct{}; sct.format=kHDR;
+    SDL_GPUGraphicsPipelineCreateInfo spci{};
+    spci.vertex_shader=svs; spci.fragment_shader=sfs;
+    spci.primitive_type=SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    spci.vertex_input_state=svis;
+    spci.target_info.color_target_descriptions=&amp;sct;
+    spci.target_info.num_color_targets=1;
+    spci.target_info.depth_stencil_format=SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    spci.target_info.has_depth_stencil_target=true;
+    spci.depth_stencil_state.enable_depth_test=true;
+    spci.depth_stencil_state.enable_depth_write=true;
+    spci.depth_stencil_state.compare_op=SDL_GPU_COMPAREOP_LESS;
+    st-&gt;scene_pipeline = SDL_CreateGPUGraphicsPipeline(st-&gt;device, &amp;spci);
+    SDL_ReleaseGPUShader(st-&gt;device, svs); SDL_ReleaseGPUShader(st-&gt;device, sfs);
+    if (!st-&gt;scene_pipeline) return fail("scene pipeline");
+
+    // --- post pipelines ---
+    SDL_GPUTextureFormat swap_fmt = SDL_GetGPUSwapchainTextureFormat(st-&gt;device, st-&gt;window);
+    st-&gt;bright_pipeline    = make_post_pipeline(st-&gt;device, kBrightFS,    "brightFS",    1, 1, kHDR);
+    st-&gt;blur_pipeline      = make_post_pipeline(st-&gt;device, kBlurFS,      "blurFS",      1, 1, kHDR);
+    st-&gt;composite_pipeline = make_post_pipeline(st-&gt;device, kCompositeFS, "compositeFS", 2, 1, swap_fmt);
+    if (!st-&gt;bright_pipeline || !st-&gt;blur_pipeline || !st-&gt;composite_pipeline) return fail("post pipelines");
+
+    st-&gt;start_ns = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (SDL_GetTicksNS() - st-&gt;start_ns) / 1.0e9f;
+
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(st-&gt;device);
+    SDL_GPUTexture *swap=nullptr; Uint32 sw=0, sh=0;
+    SDL_WaitAndAcquireGPUSwapchainTexture(cmd, st-&gt;window, &amp;swap, &amp;sw, &amp;sh);
+
+    if (swap) {
+        if (sw != st-&gt;fb_w || sh != st-&gt;fb_h) resize_targets(st, sw, sh);
+        float aspect = sh &gt; 0 ? (float)sw / (float)sh : 1.0f;
+        Mat4 model = mat4_mul(mat4_rotate_y(t * 0.8f), mat4_rotate_x(t * 0.5f));
+        Mat4 view  = mat4_translate(0, 0, -3.0f);
+        Mat4 proj  = mat4_perspective(60.0f * SDL_PI_F / 180.0f, aspect, 0.1f, 100.0f);
+        Mat4 mvp   = mat4_mul(proj, mat4_mul(view, model));
+
+        float texW = 1.0f / (st-&gt;fb_w * 0.5f);   // half-res texel size
+        float texH = 1.0f / (st-&gt;fb_h * 0.5f);
+
+        // ---- Pass 1: scene into sceneA ----
+        SDL_GPUColorTargetInfo a{};
+        a.texture=st-&gt;sceneA; a.clear_color=SDL_FColor{0.01f,0.01f,0.02f,1};
+        a.load_op=SDL_GPU_LOADOP_CLEAR; a.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPUDepthStencilTargetInfo da{};
+        da.texture=st-&gt;sceneDepth; da.clear_depth=1.0f;
+        da.load_op=SDL_GPU_LOADOP_CLEAR; da.store_op=SDL_GPU_STOREOP_DONT_CARE;
+        SDL_GPURenderPass *p1 = SDL_BeginGPURenderPass(cmd, &amp;a, 1, &amp;da);
+        SDL_BindGPUGraphicsPipeline(p1, st-&gt;scene_pipeline);
+        SDL_GPUBufferBinding vbind{}; vbind.buffer=st-&gt;vbuf; SDL_BindGPUVertexBuffers(p1,0,&amp;vbind,1);
+        SDL_GPUBufferBinding ibind{}; ibind.buffer=st-&gt;ibuf; SDL_BindGPUIndexBuffer(p1,&amp;ibind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+        SDL_PushGPUVertexUniformData(cmd, 0, &amp;mvp, sizeof(mvp));
+        SDL_DrawGPUIndexedPrimitives(p1, 36, 1, 0, 0, 0);
+        SDL_EndGPURenderPass(p1);
+
+        // ---- Pass 2: bright-pass sceneA -&gt; brightB (half-res) ----
+        SDL_GPUColorTargetInfo b{}; b.texture=st-&gt;brightB; b.clear_color=SDL_FColor{0,0,0,1};
+        b.load_op=SDL_GPU_LOADOP_CLEAR; b.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *p2 = SDL_BeginGPURenderPass(cmd, &amp;b, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(p2, st-&gt;bright_pipeline);
+        SDL_GPUTextureSamplerBinding s2{}; s2.texture=st-&gt;sceneA; s2.sampler=st-&gt;sampler;
+        SDL_BindGPUFragmentSamplers(p2, 0, &amp;s2, 1);
+        struct { float threshold; float pad[3]; } bp{ 1.0f, {0,0,0} };
+        SDL_PushGPUFragmentUniformData(cmd, 0, &amp;bp, sizeof(bp));
+        SDL_DrawGPUPrimitives(p2, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(p2);
+
+        // ---- Pass 3a: horizontal blur brightB -&gt; blurC ----
+        SDL_GPUColorTargetInfo c{}; c.texture=st-&gt;blurC; c.clear_color=SDL_FColor{0,0,0,1};
+        c.load_op=SDL_GPU_LOADOP_CLEAR; c.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *p3 = SDL_BeginGPURenderPass(cmd, &amp;c, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(p3, st-&gt;blur_pipeline);
+        SDL_GPUTextureSamplerBinding s3{}; s3.texture=st-&gt;brightB; s3.sampler=st-&gt;sampler;
+        SDL_BindGPUFragmentSamplers(p3, 0, &amp;s3, 1);
+        struct { float dir[2]; float pad[2]; } hb{ { texW, 0.0f }, {0,0} };
+        SDL_PushGPUFragmentUniformData(cmd, 0, &amp;hb, sizeof(hb));
+        SDL_DrawGPUPrimitives(p3, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(p3);
+
+        // ---- Pass 3b: vertical blur blurC -&gt; brightB ----
+        SDL_GPUColorTargetInfo d{}; d.texture=st-&gt;brightB; d.clear_color=SDL_FColor{0,0,0,1};
+        d.load_op=SDL_GPU_LOADOP_CLEAR; d.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *p4 = SDL_BeginGPURenderPass(cmd, &amp;d, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(p4, st-&gt;blur_pipeline);
+        SDL_GPUTextureSamplerBinding s4{}; s4.texture=st-&gt;blurC; s4.sampler=st-&gt;sampler;
+        SDL_BindGPUFragmentSamplers(p4, 0, &amp;s4, 1);
+        struct { float dir[2]; float pad[2]; } vb2{ { 0.0f, texH }, {0,0} };
+        SDL_PushGPUFragmentUniformData(cmd, 0, &amp;vb2, sizeof(vb2));
+        SDL_DrawGPUPrimitives(p4, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(p4);
+
+        // ---- Pass 4: composite scene + bloom into the swapchain ----
+        SDL_GPUColorTargetInfo e{}; e.texture=swap; e.clear_color=SDL_FColor{0,0,0,1};
+        e.load_op=SDL_GPU_LOADOP_CLEAR; e.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *p5 = SDL_BeginGPURenderPass(cmd, &amp;e, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(p5, st-&gt;composite_pipeline);
+        SDL_GPUTextureSamplerBinding cs[2]{};
+        cs[0].texture=st-&gt;sceneA;  cs[0].sampler=st-&gt;sampler;   // sampler(0): scene
+        cs[1].texture=st-&gt;brightB; cs[1].sampler=st-&gt;sampler;   // sampler(1): bloom
+        SDL_BindGPUFragmentSamplers(p5, 0, cs, 2);
+        struct { float intensity; float pad[3]; } cp{ 1.2f, {0,0,0} };
+        SDL_PushGPUFragmentUniformData(cmd, 0, &amp;cp, sizeof(cp));
+        SDL_DrawGPUPrimitives(p5, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(p5);
+    }
+
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (st-&gt;device) {
+        if (st-&gt;sampler)    SDL_ReleaseGPUSampler(st-&gt;device, st-&gt;sampler);
+        if (st-&gt;sceneA)     SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;sceneA);
+        if (st-&gt;brightB)    SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;brightB);
+        if (st-&gt;blurC)      SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;blurC);
+        if (st-&gt;sceneDepth) SDL_ReleaseGPUTexture(st-&gt;device, st-&gt;sceneDepth);
+        if (st-&gt;ibuf)       SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;ibuf);
+        if (st-&gt;vbuf)       SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;vbuf);
+        if (st-&gt;composite_pipeline) SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;composite_pipeline);
+        if (st-&gt;blur_pipeline)      SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;blur_pipeline);
+        if (st-&gt;bright_pipeline)    SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;bright_pipeline);
+        if (st-&gt;scene_pipeline)     SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;scene_pipeline);
+        if (st-&gt;window) SDL_ReleaseWindowFromGPUDevice(st-&gt;device, st-&gt;window);
+        SDL_DestroyGPUDevice(st-&gt;device);
+    }
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>You already push <code>threshold</code> and <code>intensity</code> as uniforms — bind them to keys and sweep the values live to feel how each shapes the glow.</li>
+        <li>Widen the blur: run the H/V blur pair two or three times in a row (ping-ponging B↔C), or grow the tap count and weights, for a softer, larger halo.</li>
+        <li>Downsample further — make the bright/blur targets quarter resolution (<code>w/4, h/4</code>). Cheaper still, and the glow gets even wider.</li>
+        <li>Tint the bloom warm: in <code>compositeFS</code> multiply <code>b</code> by <code>float3(1.1, 0.9, 0.7)</code> before adding, for a sunlit, filmic feel.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="18-instanced-rendering.html">← 18. Instanced Rendering</a>
+    <a href="index.html">Index</a>
+    <a href="20-alpha-blending.html">Next: Alpha Blending &amp; Transparency →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">3D Track</a> · Recipe 19
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

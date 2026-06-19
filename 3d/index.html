@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>3D Track — SDL3 Recipes</title>
-    <meta name="description" content="Seventeen C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, to GPU compute.">
+    <meta name="description" content="Twenty-one C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute, instancing, bloom, transparency and anti-aliasing.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,11 +19,13 @@
 <header class="hero">
     <h1>3D Track</h1>
     <p class="lede">
-        Seventeen recipes that take you from the "hello triangle" to a textured,
+        Twenty-one recipes that take you from the "hello triangle" to a textured,
         lit cube you can fly around with an FPS camera, then on through
-        cross-platform shaders, skyboxes, normal and shadow mapping, and finally
-        GPU compute. All in C++ using SDL3's <code>SDL_GPU</code> API (Metal /
-        Vulkan / D3D12 under one abstraction).
+        cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute,
+        and finally the techniques that polish a real renderer: instanced
+        rendering, post-processing bloom, alpha blending and transparency, and
+        anti-aliasing with mipmaps and MSAA. All in C++ using SDL3's
+        <code>SDL_GPU</code> API (Metal / Vulkan / D3D12 under one abstraction).
     </p>
 </header>
 
@@ -116,17 +118,39 @@
             <div class="blurb">An <code>SDL_GPU</code> compute pipeline steps a GPU particle simulation into a buffer the render pass then draws.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
 
+        <li><span class="num">18</span>
+            <span class="title"><a href="18-instanced-rendering.html">Instanced Rendering</a>
+            <div class="blurb">A whole field of cubes in one draw call — per-instance data in a slot-1 buffer with <code>input_rate = INSTANCE</code>.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">19</span>
+            <span class="title"><a href="19-post-processing-bloom.html">Post-Processing &amp; Bloom</a>
+            <div class="blurb">A four-pass glow: render offscreen, bright-pass, separable Gaussian blur, then additively composite the bloom back.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">20</span>
+            <span class="title"><a href="20-alpha-blending.html">Alpha Blending &amp; Transparency</a>
+            <div class="blurb">The blend-state struct, depth-write off for translucency, and the back-to-front draw order that keeps it correct.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">21</span>
+            <span class="title"><a href="21-mipmaps-and-msaa.html">Mipmaps &amp; MSAA</a>
+            <div class="blurb">Two anti-aliasing tools: trilinear mipmaps to stop distant shimmer, and a resolved 4× MSAA target to smooth edges.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
     </ul>
 </section>
 
 <section>
     <h2>How to run the code</h2>
     <p>
-        For recipes 01–12 and 14–17, every <em>Complete listing</em> is a drop-in
+        For recipes 01–12 and 14–21, every <em>Complete listing</em> is a drop-in
         replacement for
         <a href="../../examples/cpp-gpu/triangle.cpp">examples/cpp-gpu/triangle.cpp</a>.
         Replace that file's contents, then build with <code>make run-gpu</code>
-        from the repo root.
+        from the repo root. That covers the original recipes through GPU compute
+        as well as the later instancing, bloom, transparency and anti-aliasing
+        listings (18–21).
     </p>
     <p>
         Recipe 13 lives in the sibling folder
@@ -135,8 +159,8 @@
         with <code>make run-shadercross</code>.
     </p>
     <p>
-        Shaders in recipes 01–12 are written in <strong>Metal Shading Language
-        (MSL)</strong> and embedded as raw string literals. On macOS that
+        Shaders in recipes 01–12 and 14–21 are written in <strong>Metal Shading
+        Language (MSL)</strong> and embedded as raw string literals. On macOS that
         compiles at runtime and needs no extra tooling. On other platforms see
         <a href="02-cross-platform-shaders.html">recipe 02</a> for the
         SPIR-V / DXIL story, then jump to

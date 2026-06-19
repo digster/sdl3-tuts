@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>bgfx Track — SDL3 Recipes</title>
-    <meta name="description" content="Sixteen C++ callback-style SDL3 recipes that drive bgfx — a graphics-API-agnostic renderer (Metal / Vulkan / D3D / OpenGL behind one API). From wiring SDL3's native window handle into bgfx to a lit, textured, instanced scene, mesh loading, picking, bloom and GPU compute — with the full shaderc cross-backend shader workflow.">
+    <meta name="description" content="Twenty C++ callback-style SDL3 recipes that drive bgfx — a graphics-API-agnostic renderer (Metal / Vulkan / D3D / OpenGL behind one API). From wiring SDL3's native window handle into bgfx to a lit, textured, instanced scene, mesh loading, picking, bloom, GPU compute, skybox cubemaps, normal and shadow mapping, and transient/dynamic buffers — with the full shaderc cross-backend shader workflow.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,7 +19,7 @@
 <header class="hero">
     <h1>bgfx Track</h1>
     <p class="lede">
-        Sixteen recipes that pair SDL3 with <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
+        Twenty recipes that pair SDL3 with <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
         — a "bring your own engine", graphics-API-agnostic renderer that puts
         Metal, Vulkan, Direct3D and OpenGL behind one C++ API. SDL3 owns the
         window, events and timing; bgfx owns the pixels. You'll learn the one
@@ -27,7 +27,10 @@
         tracks never have to — how to pull a native window handle out of SDL3
         and hand it to a third-party renderer — then build up to a lit,
         textured, instanced scene, and on to mesh loading, picking, bloom and
-        GPU compute, with shaders authored once and compiled to every backend.
+        GPU compute, before reaching parity with the 3D track's advanced
+        chapters: skybox cubemaps, normal and shadow mapping, and bgfx's own
+        transient and dynamic buffers — with shaders authored once and compiled
+        to every backend.
     </p>
 </header>
 
@@ -114,6 +117,26 @@
             <span class="title"><a href="16-compute-shaders.html">Compute Shaders</a>
             <div class="blurb"><code>BUFFER_RW</code> + <code>bgfx::dispatch</code> step a particle buffer the next view draws as points — all on the GPU.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">17</span>
+            <span class="title"><a href="17-skybox-and-cubemaps.html">Skybox &amp; Cubemaps</a>
+            <div class="blurb"><code>createTextureCube</code> from six procedural faces; a cube whose positions are sample directions, pinned to the camera with <code>LEQUAL</code> depth and no Z-write.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">18</span>
+            <span class="title"><a href="18-normal-mapping.html">Normal Mapping</a>
+            <div class="blurb">Tangent + normal attributes, a procedural normal map, a TBN matrix, and Blinn-Phong over the per-pixel perturbed normal.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">19</span>
+            <span class="title"><a href="19-shadow-mapping.html">Shadow Mapping</a>
+            <div class="blurb">A depth-only light pass into a <code>D16</code> framebuffer, then a <code>SAMPLER2DSHADOW</code> hardware compare in the lit pass — two views, real cast shadows.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">20</span>
+            <span class="title"><a href="20-transient-and-dynamic-buffers.html">Transient &amp; Dynamic Buffers</a>
+            <div class="blurb"><code>allocTransientVertexBuffer</code> for geometry rebuilt every frame, <code>createDynamicVertexBuffer</code> + <code>update</code> for occasional edits — an immediate-mode debug overlay.</div></span>
+            <span class="badge badge-intermediate">Intermediate</span></li>
 
     </ul>
 </section>

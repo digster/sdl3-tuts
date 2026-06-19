@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>19 · Fixed Timestep — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>19. Fixed Timestep</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 19 — Fixed Timestep</h1>
+    <p class="tagline">
+        Make your physics deterministic and frame-rate independent with an
+        accumulator loop — a constant simulation step, run as many times as the
+        elapsed time demands, and rendered with smooth interpolation in between.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Why integrating raw variable delta time makes physics behave differently at 30, 60 and 144 fps.</li>
+        <li>The <strong>accumulator</strong> pattern: bank real elapsed time, spend it in fixed-size steps.</li>
+        <li>Keeping a <code>prev</code> and <code>curr</code> state per body and rendering the <strong>lerp</strong> between them.</li>
+        <li>Clamping the accumulator to dodge the "spiral of death".</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="04-delta-time.html">Recipe 04 — Delta Time &amp; Movement</a>.
+        This recipe is the principled upgrade to the variable-dt loop you've used
+        in every recipe since.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The problem with raw delta time</h3>
+    <p>
+        Every recipe so far multiplied velocity by <code>dt</code> and added it to
+        position. That's fine for simple motion, but the moment physics gets
+        non-linear — gravity, friction, collisions, anything that feeds the
+        result back in — the answer depends on <em>how big each step was</em>. A
+        machine running at 144 fps takes many tiny steps; one at 30 fps takes a
+        few large ones, and the two diverge. Worse, the same replay won't
+        reproduce, because frame times are never identical run to run.
+    </p>
+    <p>
+        The fix is to <strong>decouple simulation from rendering</strong>. The
+        simulation always advances by the same constant amount, no matter how
+        fast or slow the frames arrive:
+    </p>
+<pre><code class="language-cpp">const double STEP = 1.0 / 120.0;   // simulate at a fixed 120 Hz
+</code></pre>
+
+    <h3>The accumulator loop</h3>
+    <p>
+        Each frame, measure the real elapsed time and add it to an
+        <code>accumulator</code>. Then, while the accumulator holds at least one
+        whole <code>STEP</code>, run one simulation step and subtract
+        <code>STEP</code>. Some frames run zero steps, some run several — but each
+        step is always exactly <code>STEP</code> seconds:
+    </p>
+<pre><code class="language-cpp">double frame = (now - st-&gt;last_ns) / 1.0e9;
+st-&gt;last_ns = now;
+
+// Clamp before banking: never accept more than 0.25s of debt in one frame.
+if (frame &gt; 0.25) frame = 0.25;
+st-&gt;accum += frame;
+
+int steps = 0;
+while (st-&gt;accum &gt;= STEP) {
+    st-&gt;prev = st-&gt;curr;          // remember where we were...
+    integrate(st-&gt;curr, STEP);    // ...and advance one fixed step
+    st-&gt;accum -= STEP;
+    ++steps;
+}
+</code></pre>
+
+    <h3>Render the in-between with a lerp</h3>
+    <p>
+        After the loop, the accumulator holds a leftover fraction of a step —
+        time that hasn't been simulated yet. If you draw <code>curr</code>
+        directly, motion stutters because that fraction varies frame to frame.
+        Instead, compute an interpolation <strong>alpha</strong> and draw a blend
+        between the previous and current state:
+    </p>
+<pre><code class="language-cpp">double alpha = st-&gt;accum / STEP;        // 0..1, how far into the next step
+
+// Render at the interpolated position, not curr.
+float rx = st-&gt;prev.x + (st-&gt;curr.x - st-&gt;prev.x) * (float)alpha;
+float ry = st-&gt;prev.y + (st-&gt;curr.y - st-&gt;prev.y) * (float)alpha;
+</code></pre>
+    <p>
+        This is why we keep <em>both</em> <code>prev</code> and <code>curr</code>:
+        the renderer shows a point partway between the last two simulated states,
+        so the picture is always smooth even though the simulation moves in
+        discrete jumps.
+    </p>
+
+    <h3>Why clamp?</h3>
+    <p>
+        Drop a breakpoint, drag the window, or hit a hitch and one frame might
+        report half a second. Bank that unclamped and the while-loop owes 60
+        steps; running them takes longer than a frame, which makes the
+        <em>next</em> frame even longer, which banks even more steps — the
+        <strong>spiral of death</strong>. Clamping the incoming time (here to
+        0.25s) caps how far behind the simulation can fall: it simply drops the
+        excess and the game keeps running, a touch behind real time but alive.
+    </p>
+
+    <div class="note">
+        <strong>Pick STEP for stability, not for looks.</strong> Smaller steps
+        (240 Hz) make stiff physics more stable but cost more CPU; the
+        interpolation means the <em>render</em> stays smooth regardless. 120 Hz
+        is a comfortable default for arcade-feel motion.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Three balls bounce inside the window, simulated at a fixed 120 Hz and
+        drawn at interpolated positions so motion stays silky at any refresh
+        rate. The step count run this frame is logged so you can watch it flex as
+        the renderer speeds up and slows down.
+    </p>
+<pre><code class="language-cpp">/*
+ * 19-fixed-timestep.cpp — accumulator loop with render interpolation.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const double STEP   = 1.0 / 120.0;   // fixed sim rate, 120 Hz
+static const double MAXFRM = 0.25;           // clamp: max banked time per frame
+static const int    N      = 3;              // number of balls
+static const float  RAD    = 16.0f;
+
+struct Ball { float x, y, vx, vy; };
+
+struct AppState {
+    SDL_Window   *window   = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    Ball   prev[N];                 // state at the start of the last step
+    Ball   curr[N];                 // state after the last step
+    int    w = 800, h = 500;
+    double accum = 0.0;
+    Uint64 last_ns = 0;
+};
+
+/* Advance one ball by exactly dt seconds, bouncing off the walls. */
+static void integrate(Ball &amp;b, double dt, int w, int h)
+{
+    b.vy += 600.0f * (float)dt;            // gravity
+    b.x  += b.vx * (float)dt;
+    b.y  += b.vy * (float)dt;
+    if (b.x &lt; RAD)         { b.x = RAD;          b.vx = -b.vx; }
+    if (b.x &gt; w - RAD)     { b.x = w - RAD;      b.vx = -b.vx; }
+    if (b.y &gt; h - RAD)     { b.y = h - RAD;      b.vy = -b.vy * 0.92f; }  // floor, slight loss
+    if (b.y &lt; RAD)         { b.y = RAD;          b.vy = -b.vy; }
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Fixed Timestep", "1.0", "com.example.sdl3.fixedstep");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Fixed Timestep", 800, 500,
+                                     SDL_WINDOW_RESIZABLE, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    for (int i = 0; i &lt; N; ++i) {
+        st-&gt;curr[i] = Ball{ 120.0f + i * 120.0f, 80.0f, 130.0f + i * 40.0f, 0.0f };
+        st-&gt;prev[i] = st-&gt;curr[i];
+    }
+
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE)
+        return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    SDL_GetRenderOutputSize(st-&gt;renderer, &amp;st-&gt;w, &amp;st-&gt;h);
+
+    Uint64 now = SDL_GetTicksNS();
+    double frame = (now - st-&gt;last_ns) / 1.0e9;
+    st-&gt;last_ns = now;
+
+    if (frame &gt; MAXFRM) frame = MAXFRM;     // clamp: avoid the spiral of death
+    st-&gt;accum += frame;
+
+    // --- fixed-step simulation ---
+    int steps = 0;
+    while (st-&gt;accum &gt;= STEP) {
+        for (int i = 0; i &lt; N; ++i) {
+            st-&gt;prev[i] = st-&gt;curr[i];      // snapshot before stepping
+            integrate(st-&gt;curr[i], STEP, st-&gt;w, st-&gt;h);
+        }
+        st-&gt;accum -= STEP;
+        ++steps;
+    }
+    SDL_Log("steps this frame: %d", steps);
+
+    // --- render with interpolation ---
+    double alpha = st-&gt;accum / STEP;        // 0..1
+    gfx::clear(st-&gt;renderer, 16, 18, 26);
+
+    const Uint8 cols[N][3] = { {120,200,255}, {255,200,80}, {255,120,180} };
+    for (int i = 0; i &lt; N; ++i) {
+        float rx = st-&gt;prev[i].x + (st-&gt;curr[i].x - st-&gt;prev[i].x) * (float)alpha;
+        float ry = st-&gt;prev[i].y + (st-&gt;curr[i].y - st-&gt;prev[i].y) * (float)alpha;
+        gfx::set_color(st-&gt;renderer, cols[i][0], cols[i][1], cols[i][2], 255);
+        gfx::fill_circle(st-&gt;renderer, rx, ry, RAD);
+    }
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Add slow-motion: scale the elapsed time you feed the accumulator (<code>st-&gt;accum += frame * 0.3</code>) and the whole simulation eases off — the step rate is untouched, only how fast you spend time changes.</li>
+        <li>Delete the clamp and stall a frame (drag the window, or <code>SDL_Delay(800)</code> once). Log the step count and watch it balloon — that runaway is the spiral of death the clamp prevents.</li>
+        <li>Raise <code>N</code> to a few dozen balls. The fixed step keeps them all in lockstep, so the simulation stays deterministic no matter the count.</li>
+        <li>Decouple a slow 30 Hz simulation (<code>STEP = 1.0/30.0</code>) from a 144 Hz render. Without interpolation the motion judders badly; turn the lerp back on and it's smooth again — proof the alpha is doing the work.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="18-sprite-transforms.html">← 18. Sprite Rotation &amp; Flip</a>
+    <a href="index.html">Index</a>
+    <a href="20-blend-modes-and-lighting.html">Next: Blend Modes &amp; 2D Lighting →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 19
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>
