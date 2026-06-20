@@ -28,3 +28,16 @@ Modes &amp; 2D Lighting. **3D (18–21):** Instanced Rendering · Post-Processin
 &amp; Dynamic Buffers (the bgfx lighting recipes bring it to parity with the 3D
 track). Re-wired each track's footer chain, bumped the index and landing-page
 counts to 20/21/20, and logged the work in `memory/`.
+
+---
+
+## 2026-06-20
+
+> generate and add a readme for this repo.
+
+Added a root `README.md` (what the site is, the three tracks with accurate
+20/21/20 counts, how to view/run, the SDL3 callback model, repo layout, tech
+stack, MIT license) and a companion `ARCHITECTURE.md` (zero-build static
+sub-site, the parent `sdl3-2d` template relationship that explains the
+intentional outward links, page topology, and contributor conventions). No site
+pages changed.
