@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>23 · Tweening &amp; Easing — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>23. Tweening &amp; Easing</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 23 — Tweening &amp; Easing</h1>
+    <p class="tagline">
+        Replace linear motion with personality: a handful of easing functions and
+        one reusable <code>Tween</code> struct give you snappy UI pops, springy
+        menus and weighty movement — animation that accelerates, overshoots and
+        settles instead of sliding mechanically.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>What an <strong>easing function</strong> is: a reshaping of normalized time <code>t ∈ [0,1]</code>.</li>
+        <li>The classic family — quad in/out, <em>back</em> (overshoot), <em>elastic</em> (spring) and <em>bounce</em>.</li>
+        <li>A data-driven <code>Tween</code> that hosts any easing via a function pointer.</li>
+        <li>Driving both a comparison strip and a one-shot UI "pop" from the same struct.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="04-delta-time.html">Recipe 04 — Delta Time</a> for the per-frame
+        <code>dt</code> the tween integrates. Everything else here is plain math on
+        top of the <code>gfx::</code> helpers from
+        <a href="02-drawing-primitives.html">recipe 02</a>.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>An easing is a curve from t to t</h3>
+    <p>
+        Linear motion divides distance evenly across time. Easing bends that line:
+        feed in progress <code>t</code> from 0 to 1 and get back a <em>shaped</em>
+        progress. Most stay within <code>[0,1]</code>; a few deliberately don't.
+    </p>
+<pre><code class="language-cpp">typedef float (*EaseFn)(float);
+
+static float ease_linear(float t)      { return t; }
+static float ease_in_quad(float t)     { return t * t; }                 // slow start
+static float ease_out_quad(float t)    { return t * (2.0f - t); }        // slow stop
+static float ease_in_out_quad(float t) { return t &lt; 0.5f ? 2*t*t : -1 + (4 - 2*t)*t; }
+</code></pre>
+
+    <h3>Overshoot and spring deliberately leave [0,1]</h3>
+    <p>
+        The expressive curves are the ones that <em>exceed</em> their endpoints
+        partway through. <code>back</code> overshoots the target then settles;
+        <code>elastic</code> oscillates like a spring; <code>bounce</code> drops
+        and rebounds. Don't clamp them — the overshoot <em>is</em> the effect.
+    </p>
+<pre><code class="language-cpp">static float ease_out_back(float t)
+{
+    const float s = 1.70158f;          // overshoot amount
+    float u = t - 1.0f;
+    return 1.0f + (s + 1.0f) * u*u*u + s * u*u;
+}
+
+static float ease_out_bounce(float t)
+{
+    if (t &lt; 1.0f / 2.75f)        return 7.5625f * t * t;
+    else if (t &lt; 2.0f / 2.75f)   { t -= 1.5f  / 2.75f; return 7.5625f * t * t + 0.75f; }
+    else if (t &lt; 2.5f / 2.75f)   { t -= 2.25f / 2.75f; return 7.5625f * t * t + 0.9375f; }
+    else                        { t -= 2.625f/ 2.75f; return 7.5625f * t * t + 0.984375f; }
+}
+</code></pre>
+
+    <h3>One Tween struct, any curve</h3>
+    <p>
+        Because every easing has the same signature, a single struct can drive all
+        of them. It banks elapsed time, normalizes to <code>[0,1]</code>, and
+        applies its function. A <code>loop</code> flag makes it ping-pong forever
+        (for a comparison strip) or run once (for a UI pop).
+    </p>
+<pre><code class="language-cpp">struct Tween {
+    float  dur;            // seconds for one sweep
+    EaseFn ease;
+    float  t   = 0.0f;
+    int    dir = 1;        // +1 forward, -1 back
+    bool   loop = true;
+
+    void update(float dt) {
+        t += dir * dt;
+        if (t &gt;= dur) { t = dur; if (loop) dir = -1; }
+        if (t &lt;= 0.0f) { t = 0.0f; if (loop) dir = +1; }
+    }
+    float p() const { return ease(t / dur); }   // shaped progress
+};
+
+float x = from + (to - from) * tween.p();       // map progress onto anything
+</code></pre>
+
+    <div class="note">
+        <strong>Tween values, not just positions.</strong> The output is a plain
+        scalar, so the same struct eases colour, alpha, scale, camera zoom, audio
+        gain — anything you can lerp. That generality is why one little struct
+        replaces a pile of bespoke animation code.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Six tracks each show one easing: a faint curve drawn from the function plus
+        a dot driven by a looping <code>Tween</code>, so you can watch the shapes
+        race side by side. Press <kbd>Space</kbd> to fire a one-shot
+        <code>ease_out_back</code> pop on the button at the bottom.
+    </p>
+<pre><code class="language-cpp">/*
+ * 23-tweening-and-easing.cpp — an easing-function library and a reusable Tween.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const int WIN_W = 760, WIN_H = 480;
+
+typedef float (*EaseFn)(float);
+
+static float ease_linear(float t)      { return t; }
+static float ease_in_quad(float t)     { return t * t; }
+static float ease_out_quad(float t)    { return t * (2.0f - t); }
+static float ease_in_out_quad(float t) { return t &lt; 0.5f ? 2*t*t : -1.0f + (4.0f - 2*t)*t; }
+
+static float ease_out_back(float t)
+{
+    const float s = 1.70158f;
+    float u = t - 1.0f;
+    return 1.0f + (s + 1.0f) * u*u*u + s * u*u;
+}
+static float ease_out_elastic(float t)
+{
+    if (t == 0.0f || t == 1.0f) return t;
+    const float p = 0.3f;
+    return SDL_powf(2.0f, -10.0f * t) * SDL_sinf((t - p/4.0f) * (2.0f*SDL_PI_F)/p) + 1.0f;
+}
+static float ease_out_bounce(float t)
+{
+    if (t &lt; 1.0f / 2.75f)        return 7.5625f * t * t;
+    else if (t &lt; 2.0f / 2.75f)   { t -= 1.5f  / 2.75f; return 7.5625f * t * t + 0.75f; }
+    else if (t &lt; 2.5f / 2.75f)   { t -= 2.25f / 2.75f; return 7.5625f * t * t + 0.9375f; }
+    else                        { t -= 2.625f/ 2.75f; return 7.5625f * t * t + 0.984375f; }
+}
+
+struct Tween {
+    float  dur;
+    EaseFn ease;
+    float  t = 0.0f;
+    int    dir = 1;
+    bool   loop = true;
+    void update(float dt) {
+        t += dir * dt;
+        if (t &gt;= dur)  { t = dur;  if (loop) dir = -1; }
+        if (t &lt;= 0.0f) { t = 0.0f; if (loop) dir = +1; }
+    }
+    float p() const { return ease(t / dur); }
+};
+
+struct Row { EaseFn ease; Uint8 r, g, b; };
+static const int NROWS = 6;
+static const Row ROWS[NROWS] = {
+    { ease_linear,       150, 160, 180 },
+    { ease_in_out_quad,  120, 200, 255 },
+    { ease_in_quad,      120, 230, 150 },
+    { ease_out_back,     255, 200,  90 },
+    { ease_out_elastic,  230, 120, 200 },
+    { ease_out_bounce,   235, 220, 120 },
+};
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    Tween  rows[NROWS];
+    Tween  pop{ 0.5f, ease_out_back, 0.5f, 1, false };  // starts settled
+    Uint64 last_ns = 0;
+};
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Tweening and Easing", "1.0", "com.example.sdl3.tween");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Tweening and Easing", WIN_W, WIN_H, 0,
+                                     &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+    for (int i = 0; i &lt; NROWS; ++i) st-&gt;rows[i] = Tween{ 1.6f, ROWS[i].ease };
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (e-&gt;key.scancode == SDL_SCANCODE_SPACE) { st-&gt;pop.t = 0.0f; st-&gt;pop.dir = 1; } // fire one-shot
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    for (int i = 0; i &lt; NROWS; ++i) st-&gt;rows[i].update(dt);
+    st-&gt;pop.update(dt);
+
+    gfx::clear(st-&gt;renderer, 18, 20, 30);
+
+    const float x0 = 60, trackW = WIN_W - 200.0f, amp = 36.0f, rowH = 60.0f;
+    for (int i = 0; i &lt; NROWS; ++i) {
+        float baseY = 60.0f + i * rowH;
+        // faint easing curve, sampled straight from the function
+        gfx::set_color(st-&gt;renderer, 56, 62, 84, 255);
+        float prevx = x0, prevy = baseY - ROWS[i].ease(0.0f) * amp;
+        for (int s = 1; s &lt;= 48; ++s) {
+            float t  = s / 48.0f;
+            float cx = x0 + t * trackW;
+            float cy = baseY - ROWS[i].ease(t) * amp;
+            gfx::line(st-&gt;renderer, prevx, prevy, cx, cy);
+            prevx = cx; prevy = cy;
+        }
+        // dot driven by the looping Tween
+        float pr = st-&gt;rows[i].p();
+        gfx::set_color(st-&gt;renderer, ROWS[i].r, ROWS[i].g, ROWS[i].b, 255);
+        gfx::fill_circle(st-&gt;renderer, x0 + pr * trackW, baseY - pr * amp, 8);
+    }
+
+    // one-shot pop button (scale eased about its centre)
+    float scale = 0.7f + 0.45f * st-&gt;pop.p();
+    float cx = WIN_W * 0.5f, cy = WIN_H - 46.0f, hw = 70.0f * scale, hh = 24.0f * scale;
+    gfx::set_color(st-&gt;renderer, 90, 140, 240, 255);
+    gfx::fill_rect(st-&gt;renderer, cx - hw, cy - hh, hw * 2, hh * 2);
+    gfx::set_color(st-&gt;renderer, 200, 220, 255, 255);
+    gfx::rect(st-&gt;renderer, cx - hw, cy - hh, hw * 2, hh * 2);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Add the <em>in</em> variants by mirroring: <code>ease_in_x(t) = 1 - ease_out_x(1 - t)</code>. One identity gives you the whole back/elastic/bounce family for free.</li>
+        <li>Chain tweens: when one finishes, start the next (move, then scale, then fade). A tiny state index over an array of <code>Tween</code>s makes a sequence.</li>
+        <li>Ease a colour: lerp two <code>SDL_Color</code>s by <code>pop.p()</code> so the button shifts hue as it pops.</li>
+        <li>Add a delay field to <code>Tween</code> (count <code>dt</code> down before advancing <code>t</code>) to stagger a row of UI elements into a cascade.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="22-camera-and-parallax.html">← 22. Camera &amp; Parallax</a>
+    <a href="index.html">Index</a>
+    <a href="24-scene-state-stack.html">Next: Scene/State Stack →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 23
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

@@ -504,7 +504,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         <li>Tint each mip level a different colour at generation time (or in a custom mip-gen pass) to <em>see</em> exactly which level the GPU samples where — distant pixels light up as higher levels.</li>
     </ol>
     <p>
-        And that completes the 3D track. You started with
+        That rounds out the image-quality essentials. You started with
         <a href="01-hello-triangle.html">a single triangle</a> and a bare
         SDL_GPU pipeline, grew it into a lit and textured cube, learned to fly
         around it with an <a href="11-fps-camera.html">FPS camera</a>, then
@@ -515,16 +515,18 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         fields in one <a href="18-instanced-rendering.html">instanced draw</a>,
         made bright things <a href="19-post-processing-bloom.html">glow</a>,
         layered <a href="20-alpha-blending.html">transparency</a> correctly, and
-        finally smoothed the whole image with mipmaps and MSAA. That is a
-        complete real-time renderer's toolkit — every technique here is a
-        building block you'll recognise in any modern engine.
+        smoothed the image with mipmaps and MSAA. The next recipes push into
+        lighting at scale — many
+        <a href="22-point-and-spot-lights.html">point and spot lights</a>, HDR
+        tone mapping, environment reflections, and a deferred renderer that
+        decouples light cost from geometry.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="20-alpha-blending.html">← 20. Alpha Blending &amp; Transparency</a>
     <a href="index.html">Index</a>
-    <a href="../bgfx/index.html">bgfx Track →</a>
+    <a href="22-point-and-spot-lights.html">Next: Point &amp; Spot Lights →</a>
 </nav>
 
 </main>

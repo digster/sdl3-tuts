@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>22 · Compute Particles — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>22. Compute Particles</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 22 — Compute Particles</h1>
+    <p class="tagline">
+        Grow the compute fountain into a <em>system</em>: a flow field swirls
+        65k particles, additive blending makes them glow, a speed-driven colour
+        ramp gives them heat, and the mouse becomes an attractor you can stir the
+        field with.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Advecting particles through a procedural <strong>flow field</strong> instead of plain gravity.</li>
+        <li>An interactive <strong>attractor</strong> — feeding the mouse position into the compute kernel.</li>
+        <li><strong>Additive blending</strong> so overlapping particles accumulate into glow.</li>
+        <li>Colouring points by speed and life for a hot-to-cold look — all on the GPU.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="16-compute-shaders.html">Recipe 16 — Compute Shaders</a> built the
+        single-force fountain and the dispatch-then-draw plumbing; this recipe
+        keeps that exact mechanism and changes what the kernel <em>does</em>.
+        <a href="20-transient-and-dynamic-buffers.html">Recipe 20</a> covers the
+        dynamic buffer the particles live in.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>From one force to a field</h3>
+    <p>
+        Recipe 16 pushed every particle with the same downward gravity. A flow
+        field instead gives a <em>different</em> velocity at every point in space.
+        A cheap curl-like field from a few sines costs nothing and produces
+        organic, turbulent motion — no texture, no noise table.
+    </p>
+<pre><code># cs_flow.sc — velocity from position
+vec3 flow(vec3 p) {
+    return vec3(sin(p.y*1.3 + p.z*0.7),
+                sin(p.z*1.1 + p.x*0.9),
+                sin(p.x*1.2 + p.y*0.8));
+}
+</code></pre>
+
+    <h3>An attractor from the mouse</h3>
+    <p>
+        Feed an attractor position and strength in through a uniform. A linear pull
+        toward it (no <code>normalize</code>, so there's no singularity at the
+        centre) lets you stir the whole swarm by moving the mouse with the button
+        held.
+    </p>
+<pre><code class="language-cpp">uniform vec4 u_params;     // x = dt, y = count, z = time, w = attract strength
+uniform vec4 u_attract;    // xyz = attractor position
+// ...inside main():
+vec3 force  = flow(p.xyz) * 1.2;
+force      += (u_attract.xyz - p.xyz) * u_params.w;   // pull toward the mouse
+v.xyz       = v.xyz * 0.96 + force * u_params.x;       // damping keeps it from exploding
+p.xyz      += v.xyz * u_params.x;
+</code></pre>
+
+    <h3>Additive blending makes glow</h3>
+    <p>
+        Drawing the points with <code>BGFX_STATE_BLEND_ADD</code> and depth-write
+        off means overlapping particles <em>sum</em> their colour. Dense regions
+        bloom to white while sparse wisps stay dim — the cheapest possible glow,
+        and the reason particle effects almost always blend additively.
+    </p>
+<pre><code class="language-cpp">bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A
+             | BGFX_STATE_PT_POINTS | BGFX_STATE_BLEND_ADD);
+</code></pre>
+
+    <div class="note">
+        <strong>The look is all in the kernel + blend.</strong> The C++ side is
+        nearly identical to recipe 16 — same dynamic buffer, same
+        <code>dispatch</code>-then-draw across two views. Everything that makes this
+        feel alive lives in the compute shader's forces and the additive draw
+        state.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        65,536 particles advected through a flow field, glowing additively, hot
+        where they move fast. Hold the <strong>left mouse button</strong> and move
+        to drag an attractor through the swarm. Native-handle / <code>loadProgram</code>
+        helpers identical to recipe 03 (elided). Shaders: <code>cs_flow</code>
+        (compute), <code>vs_particle</code> / <code>fs_particle</code>.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/22-compute-particles.cpp — a flow-field particle system with an interactive
+ * attractor, drawn additively. Mechanism (dynamic buffer, dispatch-then-draw) from
+ * recipe 16. Shaders: cs_flow (compute), vs_particle / fs_particle.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+#include &lt;vector&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+static bgfx::ProgramHandle loadComputeProgram(const char *cs);
+
+static const int N = 65536;
+struct Particle { float pos[4]; float vel[4]; };   // pos.xyz + life, vel.xyz
+
+struct AppState {
+    SDL_Window *window = nullptr; int width = 1280, height = 720;
+    bgfx::DynamicVertexBufferHandle buffer = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle compute = BGFX_INVALID_HANDLE, render = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_params = BGFX_INVALID_HANDLE, u_attract = BGFX_INVALID_HANDLE;
+    float mouseX = 0, mouseY = 0; bool attracting = false;
+    Uint64 startNs = 0, lastNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Compute Particles", "1.0", "com.example.sdl3.bgfx.particles");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Compute Particles", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type = bgfx::RendererType::Count;
+    init.platformData.nwh = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width = (uint32_t)st-&gt;width; init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+    if (!(bgfx::getCaps()-&gt;supported &amp; BGFX_CAPS_COMPUTE)) return fail("compute unsupported");
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position,  4, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 4, bgfx::AttribType::Float).end();
+
+    std::vector&lt;Particle&gt; seed(N);
+    for (int i = 0; i &lt; N; ++i)
+        seed[i] = { { (SDL_randf()-0.5f)*6, (SDL_randf()-0.5f)*4, (SDL_randf()-0.5f)*6, SDL_randf()*2.0f },
+                    { 0, 0, 0, 0 } };
+    st-&gt;buffer = bgfx::createDynamicVertexBuffer(
+        bgfx::copy(seed.data(), uint32_t(seed.size()*sizeof(Particle))), layout,
+        BGFX_BUFFER_COMPUTE_READ | BGFX_BUFFER_COMPUTE_WRITE);
+
+    st-&gt;compute  = loadComputeProgram("cs_flow");
+    st-&gt;render   = loadProgram("vs_particle", "fs_particle");
+    st-&gt;u_params = bgfx::createUniform("u_params",  bgfx::UniformType::Vec4);
+    st-&gt;u_attract= bgfx::createUniform("u_attract", bgfx::UniformType::Vec4);
+    if (!bgfx::isValid(st-&gt;compute) || !bgfx::isValid(st-&gt;render)) return fail("loadProgram");
+
+    st-&gt;startNs = st-&gt;lastNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_MOUSE_MOTION) { st-&gt;mouseX = e-&gt;motion.x; st-&gt;mouseY = e-&gt;motion.y; }
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_DOWN &amp;&amp; e-&gt;button.button == SDL_BUTTON_LEFT) st-&gt;attracting = true;
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_UP   &amp;&amp; e-&gt;button.button == SDL_BUTTON_LEFT) st-&gt;attracting = false;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;lastNs) / 1.0e9f; if (dt &gt; 0.05f) dt = 0.05f;
+    st-&gt;lastNs = now;
+    float time = (now - st-&gt;startNs) / 1.0e9f;
+
+    // --- view 0: simulate ---
+    // Map the mouse (window pixels) to a point on the z = 0 plane, roughly framing the swarm.
+    int ww = st-&gt;width &gt; 0 ? st-&gt;width : 1, wh = st-&gt;height &gt; 0 ? st-&gt;height : 1;
+    float ax = ((float)st-&gt;mouseX / ww * 2.0f - 1.0f) * 6.0f;
+    float ay = -((float)st-&gt;mouseY / wh * 2.0f - 1.0f) * 4.0f;
+    float attract[4] = { ax, ay, 0.0f, 0.0f };
+    float params[4]  = { dt, (float)N, time, st-&gt;attracting ? 3.0f : 0.0f };
+    bgfx::setUniform(st-&gt;u_params,  params);
+    bgfx::setUniform(st-&gt;u_attract, attract);
+    bgfx::setBuffer(0, st-&gt;buffer, bgfx::Access::ReadWrite);
+    bgfx::dispatch(0, st-&gt;compute, (N + 63) / 64, 1, 1);
+
+    // --- view 1: draw the same buffer additively ---
+    bgfx::setViewClear(1, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x03040aff, 1.0f, 0);
+    bgfx::setViewRect(1, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+    const bx::Vec3 at = { 0, 0, 0 }, eye = { 0, 0, -11.0f };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 60.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 100.0f, bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(1, view, proj);
+
+    float mtx[16]; bx::mtxIdentity(mtx);
+    bgfx::setTransform(mtx);
+    bgfx::setVertexBuffer(0, st-&gt;buffer);
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A
+                 | BGFX_STATE_PT_POINTS | BGFX_STATE_BLEND_ADD);
+    bgfx::submit(1, st-&gt;render);
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (bgfx::isValid(st-&gt;u_attract)) bgfx::destroy(st-&gt;u_attract);
+    if (bgfx::isValid(st-&gt;u_params))  bgfx::destroy(st-&gt;u_params);
+    if (bgfx::isValid(st-&gt;buffer))    bgfx::destroy(st-&gt;buffer);
+    if (bgfx::isValid(st-&gt;render))    bgfx::destroy(st-&gt;render);
+    if (bgfx::isValid(st-&gt;compute))   bgfx::destroy(st-&gt;compute);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+<pre><code># cs_flow.sc — advect through a flow field + mouse attractor, respawn on death
+#include "bgfx_compute.sh"
+BUFFER_RW(b_particles, vec4, 0);
+uniform vec4 u_params;      // x = dt, y = count, z = time, w = attract strength
+uniform vec4 u_attract;     // xyz = attractor position
+NUM_THREADS(64, 1, 1)
+
+vec3 flow(vec3 p) {
+    return vec3(sin(p.y*1.3 + p.z*0.7),
+                sin(p.z*1.1 + p.x*0.9),
+                sin(p.x*1.2 + p.y*0.8));
+}
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (float(id) &gt;= u_params.y) return;
+    vec4 p = b_particles[id*2u + 0u];        // xyz pos, w life
+    vec4 v = b_particles[id*2u + 1u];        // xyz velocity
+
+    vec3 force = flow(p.xyz) * 1.2;
+    force += (u_attract.xyz - p.xyz) * u_params.w;   // linear pull, no singularity
+    v.xyz = v.xyz * 0.96 + force * u_params.x;        // damping
+    p.xyz += v.xyz * u_params.x;
+    p.w   -= u_params.x;
+
+    if (p.w &lt;= 0.0) {                          // respawn in the seed volume
+        float r  = fract(sin(float(id)*12.9898 + u_params.z) * 43758.5453);
+        float r2 = fract(sin(float(id)*78.233  + u_params.z) * 43758.5453);
+        float r3 = fract(sin(float(id)*37.719  + u_params.z) * 43758.5453);
+        p = vec4((r-0.5)*6.0, (r2-0.5)*4.0, (r3-0.5)*6.0, 1.5 + 2.0*r);
+        v = vec4_splat(0.0);
+    }
+    b_particles[id*2u + 0u] = p;
+    b_particles[id*2u + 1u] = v;
+}
+</code></pre>
+<pre><code># vs_particle.sc / fs_particle.sc — colour by speed and life
+# (vs)
+$input  a_position, a_texcoord0
+$output v_color0
+#include "bgfx_shader.sh"
+void main() {
+    gl_Position = mul(u_modelViewProj, vec4(a_position.xyz, 1.0));
+    float life = clamp(a_position.w, 0.0, 1.0);
+    float spd  = length(a_texcoord0.xyz);
+    vec3 cold  = vec3(0.10, 0.30, 0.90);
+    vec3 hot   = vec3(1.00, 0.60, 0.20);
+    v_color0   = vec4(mix(cold, hot, clamp(spd*0.4, 0.0, 1.0)) * (0.25 + 0.75*life), 1.0);
+}
+# (fs)
+$input v_color0
+#include "bgfx_shader.sh"
+void main() { gl_FragColor = v_color0; }
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Make it true curl noise: sample a 3D noise texture's gradient and take its curl for a divergence-free field that never bunches up.</li>
+        <li>Add a repulsor on the right mouse button (negate the attractor strength) and push particles away.</li>
+        <li>Trade points for soft sprites: expand each particle into a camera-facing quad (recipe 11 instancing) and sample a radial-falloff texture for round, soft blobs.</li>
+        <li>Drive the colour ramp from acceleration instead of speed — particles flash where the field changes direction sharply.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="21-pbr-and-ibl.html">← Prev: PBR &amp; Image-Based Lighting</a>
+    <a href="index.html">Index</a>
+    <a href="23-stencil-reflections.html">Next: Stencil Reflections &amp; Outlines →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 22
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

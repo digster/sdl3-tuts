@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>21 · Clipping &amp; Viewports — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>21. Clipping &amp; Viewports</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 21 — Clipping &amp; Viewports</h1>
+    <p class="tagline">
+        Carve the window into independent drawing regions with
+        <code>SDL_SetRenderViewport</code> for split-screen, then mask a minimap
+        to a neat border with <code>SDL_SetRenderClipRect</code> — two remaps that
+        compose into HUDs, picture-in-picture and co-op cameras.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>How a <strong>viewport</strong> both <em>moves the origin</em> and bounds drawing to a sub-rectangle of the window.</li>
+        <li>How a <strong>clip rect</strong> is a pure scissor mask — it discards pixels but does not shift coordinates.</li>
+        <li>That clip coordinates are interpreted in the <em>current viewport's</em> space, so the two compose.</li>
+        <li>Building split-screen cameras and a clipped corner minimap from these two calls alone.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="16-render-targets.html">Recipe 16 — Render Targets</a> for the
+        idea of a separate drawing surface, and
+        <a href="04-delta-time.html">recipe 04</a> for the delta-time loop. Unlike
+        recipe 16, viewports and clip rects need <em>no extra texture</em> — they
+        retarget the window itself.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>A viewport moves the origin</h3>
+    <p>
+        <code>SDL_SetRenderViewport</code> takes an <code>SDL_Rect</code> (integer
+        pixels) and makes every subsequent draw call relative to that rect's
+        top-left, clipped to its bounds. Drawing at <code>(0, 0)</code> now lands
+        at the viewport corner, not the window corner — which is exactly what you
+        want for split-screen: render the <em>same</em> world twice, each through a
+        viewport that owns half the window.
+    </p>
+<pre><code class="language-cpp">SDL_Rect left{ 0, 0, half_w, win_h };
+SDL_SetRenderViewport(st-&gt;renderer, &amp;left);   // origin + clip to the left half
+// ...draw the world centred on player 1...
+SDL_SetRenderViewport(st-&gt;renderer, nullptr); // back to the whole window
+</code></pre>
+
+    <h3>A camera offset per viewport</h3>
+    <p>
+        The viewport gives each player their own canvas; a per-view translation
+        gives each their own camera. We place the followed object at the viewport
+        centre by adding an offset to every world coordinate. Because the viewport
+        already clips, anything off the edge simply doesn't draw — no manual
+        culling required.
+    </p>
+<pre><code class="language-cpp">float ox = vp.w * 0.5f - cam_x;     // world-&gt;viewport translation
+float oy = vp.h * 0.5f - cam_y;
+gfx::fill_circle(st-&gt;renderer, ox + ball.x, oy + ball.y, 16);
+</code></pre>
+
+    <h3>A clip rect masks, it doesn't move</h3>
+    <p>
+        For the minimap we want a <em>small</em> corner panel that shows the whole
+        world scaled down — but with a clean inset border so the scaled markers
+        never bleed to the panel's edge. Set a viewport for the panel, then a
+        <code>SDL_SetRenderClipRect</code> a few pixels inside it. The clip rect
+        is in <em>viewport</em> coordinates, so an inset of <code>(4, 4)</code>
+        sits 4px from the panel corner. Pixels outside are discarded; coordinates
+        are untouched.
+    </p>
+<pre><code class="language-cpp">SDL_SetRenderViewport(st-&gt;renderer, &amp;panel);            // corner panel
+SDL_Rect inset{ 4, 4, panel.w - 8, panel.h - 8 };
+SDL_SetRenderClipRect(st-&gt;renderer, &amp;inset);            // scissor, in panel space
+// ...draw the scaled world; the 4px frame stays clean...
+SDL_SetRenderClipRect(st-&gt;renderer, nullptr);           // clear the scissor
+</code></pre>
+
+    <div class="note">
+        <strong>Reset both when you're done.</strong> Viewport and clip state are
+        sticky on the renderer. Always restore with <code>nullptr</code> before
+        drawing window-wide UI (the divider line, a global flash) or the next
+        frame inherits the last region you set.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Six balls bounce in a world larger than the window. The screen is split
+        into two camera views — the left follows the cyan ball, the right follows
+        the orange one — and a clipped minimap in the top-right corner shows the
+        whole world with player markers. Press <kbd>C</kbd> to toggle the minimap's
+        clip rect and watch the scaled world spill past its border.
+    </p>
+<pre><code class="language-cpp">/*
+ * 21-clipping-and-viewports.cpp — split-screen viewports + a scissor-clipped minimap.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const int   WIN_W = 880, WIN_H = 460;
+static const float WORLD_W = 1200, WORLD_H = 700;
+static const int   N = 6;
+
+struct Ball { float x, y, vx, vy; Uint8 r, g, b; };
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    Ball   balls[N];
+    bool   clip_on = true;
+    Uint64 last_ns = 0;
+};
+
+/* Draw the whole world into a viewport, translated so (cam_x, cam_y) is centred. */
+static void draw_world(AppState *st, const SDL_Rect &amp;vp, float cam_x, float cam_y)
+{
+    SDL_SetRenderViewport(st-&gt;renderer, &amp;vp);          // origin + clip to vp
+    float ox = vp.w * 0.5f - cam_x;
+    float oy = vp.h * 0.5f - cam_y;
+
+    gfx::set_color(st-&gt;renderer, 26, 30, 44, 255);     // view backdrop
+    gfx::fill_rect(st-&gt;renderer, 0, 0, (float)vp.w, (float)vp.h);
+    gfx::set_color(st-&gt;renderer, 64, 74, 104, 255);    // world bounds
+    gfx::rect(st-&gt;renderer, ox, oy, WORLD_W, WORLD_H);
+
+    for (int i = 0; i &lt; N; ++i) {
+        gfx::set_color(st-&gt;renderer, st-&gt;balls[i].r, st-&gt;balls[i].g, st-&gt;balls[i].b, 255);
+        gfx::fill_circle(st-&gt;renderer, ox + st-&gt;balls[i].x, oy + st-&gt;balls[i].y, 16);
+    }
+    SDL_SetRenderViewport(st-&gt;renderer, nullptr);
+}
+
+/* A scaled-down map of the world in a corner panel, optionally clipped to an inset. */
+static void draw_minimap(AppState *st, const SDL_Rect &amp;panel)
+{
+    SDL_SetRenderViewport(st-&gt;renderer, &amp;panel);
+    if (st-&gt;clip_on) {
+        SDL_Rect inset{ 4, 4, panel.w - 8, panel.h - 8 };
+        SDL_SetRenderClipRect(st-&gt;renderer, &amp;inset);   // scissor, in panel space
+    }
+    gfx::set_color(st-&gt;renderer, 12, 14, 22, 255);
+    gfx::fill_rect(st-&gt;renderer, 0, 0, (float)panel.w, (float)panel.h);
+
+    float sx = panel.w / WORLD_W, sy = panel.h / WORLD_H;
+    for (int i = 0; i &lt; N; ++i) {
+        gfx::set_color(st-&gt;renderer, st-&gt;balls[i].r, st-&gt;balls[i].g, st-&gt;balls[i].b, 255);
+        gfx::fill_circle(st-&gt;renderer, st-&gt;balls[i].x * sx, st-&gt;balls[i].y * sy, 5);
+    }
+    SDL_SetRenderClipRect(st-&gt;renderer, nullptr);       // always clear the scissor
+    gfx::set_color(st-&gt;renderer, 180, 190, 220, 255);
+    gfx::rect(st-&gt;renderer, 0, 0, (float)panel.w, (float)panel.h);
+    SDL_SetRenderViewport(st-&gt;renderer, nullptr);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Clipping and Viewports", "1.0", "com.example.sdl3.viewports");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Clipping and Viewports", WIN_W, WIN_H, 0,
+                                     &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    const Uint8 cols[N][3] = {
+        {120,200,255}, {255,180,90}, {120,230,150},
+        {230,120,200}, {235,220,120}, {150,170,255}
+    };
+    for (int i = 0; i &lt; N; ++i) {
+        st-&gt;balls[i] = Ball{
+            SDL_randf() * WORLD_W, SDL_randf() * WORLD_H,
+            (SDL_randf() * 2 - 1) * 220.0f, (SDL_randf() * 2 - 1) * 220.0f,
+            cols[i][0], cols[i][1], cols[i][2]
+        };
+    }
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (e-&gt;key.scancode == SDL_SCANCODE_C) st-&gt;clip_on = !st-&gt;clip_on;
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    for (int i = 0; i &lt; N; ++i) {
+        Ball &amp;b = st-&gt;balls[i];
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        if (b.x &lt; 16)          { b.x = 16;          b.vx = -b.vx; }
+        if (b.x &gt; WORLD_W - 16) { b.x = WORLD_W - 16; b.vx = -b.vx; }
+        if (b.y &lt; 16)          { b.y = 16;          b.vy = -b.vy; }
+        if (b.y &gt; WORLD_H - 16) { b.y = WORLD_H - 16; b.vy = -b.vy; }
+    }
+
+    gfx::clear(st-&gt;renderer, 0, 0, 0);                  // window-wide letterbox black
+
+    int gutter = 2, half = (WIN_W - gutter) / 2;
+    SDL_Rect left{ 0, 0, half, WIN_H };
+    SDL_Rect right{ half + gutter, 0, WIN_W - half - gutter, WIN_H };
+    draw_world(st, left,  st-&gt;balls[0].x, st-&gt;balls[0].y);   // P1 follows cyan
+    draw_world(st, right, st-&gt;balls[1].x, st-&gt;balls[1].y);   // P2 follows orange
+
+    SDL_Rect panel{ WIN_W - 224, 16, 208, 122 };            // top-right minimap
+    draw_minimap(st, panel);
+
+    gfx::set_color(st-&gt;renderer, 0, 0, 0, 255);             // split-screen divider
+    gfx::fill_rect(st-&gt;renderer, (float)half, 0, (float)gutter, WIN_H);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Switch to a <em>vertical</em> split (stack the two viewports top/bottom). Only the rects change — the draw code is identical, which is the whole point of viewport-relative coordinates.</li>
+        <li>Add a third small viewport for a spectator camera that frames both players (centre on the midpoint, zoom out by scaling the offset).</li>
+        <li>Comment out the <code>SDL_SetRenderViewport(..., nullptr)</code> resets and watch every later draw inherit the last region — a vivid reminder that the state is sticky.</li>
+        <li>Give the minimap a circular look: keep the rectangular clip but draw a filled dark circle first, so the corners read as a rounded porthole.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="20-blend-modes-and-lighting.html">← 20. Blend Modes &amp; 2D Lighting</a>
+    <a href="index.html">Index</a>
+    <a href="22-camera-and-parallax.html">Next: Camera &amp; Parallax →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 21
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

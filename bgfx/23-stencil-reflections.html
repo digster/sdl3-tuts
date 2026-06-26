@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>23 · Stencil Reflections &amp; Outlines — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>23. Stencil Reflections &amp; Outlines</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 23 — Stencil Reflections &amp; Outlines</h1>
+    <p class="tagline">
+        Put the stencil buffer to work. Mark a floor's pixels, then draw the scene
+        mirrored <em>only</em> there for a planar reflection — and learn the same
+        mask trick that produces selection outlines.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>What the <strong>stencil buffer</strong> is and how <code>bgfx::setStencil</code> reads and writes it.</li>
+        <li>Marking a region (the floor) with a stencil reference value.</li>
+        <li>Drawing reflected geometry gated by <code>STENCIL_TEST_EQUAL</code> so it stays inside the mirror.</li>
+        <li>Why a mirror flips winding — and the same masking idea behind outlines.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="08-depth-and-render-state.html">Recipe 08 — Depth &amp; Render
+        State</a> for <code>bgfx::setState</code> and depth, and
+        <a href="07-spinning-cube.html">recipe 07</a> for the cube. The stencil
+        buffer rides alongside depth in the same <code>D24S8</code> attachment.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The stencil buffer</h3>
+    <p>
+        Alongside depth, each pixel carries a small integer <strong>stencil</strong>
+        value. You can write it during one draw and test against it during another,
+        masking where later geometry is allowed to land. It's the classic tool for
+        mirrors, portals, decals and outlines.
+    </p>
+
+    <h3>Order matters — make the view sequential</h3>
+    <p>
+        A stencil mirror is a strict sequence: mark, reflect, composite. bgfx sorts
+        draw calls within a view by default, so we switch the view to
+        <code>Sequential</code> to guarantee submission order.
+    </p>
+<pre><code class="language-cpp">bgfx::setViewMode(0, bgfx::ViewMode::Sequential);
+bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH | BGFX_CLEAR_STENCIL, 0x0a0c14ff, 1.0f, 0);
+</code></pre>
+
+    <h3>Step 1 — mark the floor into stencil</h3>
+    <p>
+        Draw the floor with colour and depth writes <em>off</em>, replacing the
+        stencil with 1 wherever the floor passes the depth test. Now the floor's
+        visible pixels carry a 1; everything else stays 0.
+    </p>
+<pre><code class="language-cpp">bgfx::setStencil(BGFX_STENCIL_TEST_ALWAYS
+               | BGFX_STENCIL_FUNC_REF(1) | BGFX_STENCIL_FUNC_RMASK(0xff)
+               | BGFX_STENCIL_OP_FAIL_S_KEEP | BGFX_STENCIL_OP_FAIL_Z_KEEP
+               | BGFX_STENCIL_OP_PASS_Z_REPLACE);
+bgfx::setState(BGFX_STATE_DEPTH_TEST_LESS);     // no colour, no depth write
+</code></pre>
+
+    <h3>Step 2 — draw the reflected scene where stencil == 1</h3>
+    <p>
+        Mirror each object about the floor plane (negate Y around it, scale Y by
+        −1) and draw it testing <code>STENCIL_TEST_EQUAL</code> against 1 — so the
+        reflection can only appear inside the floor. Mirroring flips triangle
+        winding, so cull the <em>opposite</em> face.
+    </p>
+<pre><code class="language-cpp">bgfx::setStencil(BGFX_STENCIL_TEST_EQUAL | BGFX_STENCIL_FUNC_REF(1) | BGFX_STENCIL_FUNC_RMASK(0xff));
+bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z
+             | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CCW);   // flipped winding
+</code></pre>
+
+    <h3>Step 3 — composite the floor, then the real scene</h3>
+    <p>
+        Draw the floor again, this time translucent, so the reflection shows
+        through it tinted. Finally draw the upright scene normally. The result: a
+        glossy floor mirroring the cubes above it.
+    </p>
+
+    <div class="note">
+        <strong>Backend conventions vary.</strong> Like shadow mapping, the exact
+        winding to cull and the sign of the mirror depend on
+        <code>homogeneousDepth</code> / clip-space handedness across D3D, Metal,
+        Vulkan and GL. If the reflection culls away or shows inside-out, flip
+        <code>CULL_CCW</code> ↔ <code>CULL_CW</code> — the logic is unchanged.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Three cubes hover over a mirror floor that reflects them via the stencil
+        buffer. Native-handle / <code>loadProgram</code> helpers identical to recipe
+        03 (elided). Shaders: <code>vs_solid</code> / <code>fs_solid</code>.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/23-stencil-reflections.cpp — planar reflection via the stencil buffer.
+ * Native-handle + loadProgram helpers identical to recipe 03 (elided).
+ * Shaders: vs_solid / fs_solid.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+
+static const float FLOOR_Y = -1.5f;
+
+struct PNVertex { float px, py, pz; float nx, ny, nz; };
+static const PNVertex kCube[24] = {
+    {  0.5f,-0.5f,-0.5f, 1,0,0 },{  0.5f, 0.5f,-0.5f, 1,0,0 },{  0.5f, 0.5f, 0.5f, 1,0,0 },{  0.5f,-0.5f, 0.5f, 1,0,0 },
+    { -0.5f,-0.5f, 0.5f,-1,0,0 },{ -0.5f, 0.5f, 0.5f,-1,0,0 },{ -0.5f, 0.5f,-0.5f,-1,0,0 },{ -0.5f,-0.5f,-0.5f,-1,0,0 },
+    { -0.5f, 0.5f,-0.5f, 0,1,0 },{ -0.5f, 0.5f, 0.5f, 0,1,0 },{  0.5f, 0.5f, 0.5f, 0,1,0 },{  0.5f, 0.5f,-0.5f, 0,1,0 },
+    { -0.5f,-0.5f, 0.5f, 0,-1,0 },{ -0.5f,-0.5f,-0.5f, 0,-1,0 },{  0.5f,-0.5f,-0.5f, 0,-1,0 },{  0.5f,-0.5f, 0.5f, 0,-1,0 },
+    { -0.5f,-0.5f, 0.5f, 0,0,1 },{  0.5f,-0.5f, 0.5f, 0,0,1 },{  0.5f, 0.5f, 0.5f, 0,0,1 },{ -0.5f, 0.5f, 0.5f, 0,0,1 },
+    {  0.5f,-0.5f,-0.5f, 0,0,-1 },{ -0.5f,-0.5f,-0.5f, 0,0,-1 },{ -0.5f, 0.5f,-0.5f, 0,0,-1 },{  0.5f, 0.5f,-0.5f, 0,0,-1 },
+};
+static const uint16_t kIdx[36] = {
+    0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+    12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23,
+};
+// A floor quad on the y = FLOOR_Y plane, normal +Y.
+static const PNVertex kFloor[4] = {
+    { -6, FLOOR_Y, -6, 0,1,0 }, {  6, FLOOR_Y, -6, 0,1,0 },
+    {  6, FLOOR_Y,  6, 0,1,0 }, { -6, FLOOR_Y,  6, 0,1,0 },
+};
+static const uint16_t kFloorIdx[6] = { 0, 1, 2, 0, 2, 3 };
+
+struct AppState {
+    SDL_Window *window = nullptr; int width = 1280, height = 720;
+    bgfx::VertexLayout layout;
+    bgfx::VertexBufferHandle cubeVbh = BGFX_INVALID_HANDLE, floorVbh = BGFX_INVALID_HANDLE;
+    bgfx::IndexBufferHandle  cubeIbh = BGFX_INVALID_HANDLE, floorIbh = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle program = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_color = BGFX_INVALID_HANDLE;
+    Uint64 startNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+// Per-cube colours and angular offsets for the three hovering cubes.
+static const float kCol[3][3] = { {0.95f,0.5f,0.4f}, {0.45f,0.8f,0.95f}, {0.7f,0.95f,0.5f} };
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Stencil Reflections", "1.0", "com.example.sdl3.bgfx.stencil");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Stencil Reflections", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type = bgfx::RendererType::Count;
+    init.platformData.nwh = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width = (uint32_t)st-&gt;width; init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+
+    bgfx::setViewMode(0, bgfx::ViewMode::Sequential);                 // honour submit order
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH | BGFX_CLEAR_STENCIL, 0x0a0c14ff, 1.0f, 0);
+
+    st-&gt;layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Normal,   3, bgfx::AttribType::Float).end();
+    st-&gt;cubeVbh  = bgfx::createVertexBuffer(bgfx::makeRef(kCube, sizeof(kCube)), st-&gt;layout);
+    st-&gt;cubeIbh  = bgfx::createIndexBuffer (bgfx::makeRef(kIdx, sizeof(kIdx)));
+    st-&gt;floorVbh = bgfx::createVertexBuffer(bgfx::makeRef(kFloor, sizeof(kFloor)), st-&gt;layout);
+    st-&gt;floorIbh = bgfx::createIndexBuffer (bgfx::makeRef(kFloorIdx, sizeof(kFloorIdx)));
+    st-&gt;program  = loadProgram("vs_solid", "fs_solid");
+    st-&gt;u_color  = bgfx::createUniform("u_color", bgfx::UniformType::Vec4);
+    if (!bgfx::isValid(st-&gt;program)) return fail("loadProgram");
+
+    st-&gt;startNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+// Submit one cube with an upright or mirrored model matrix.
+static void submitCube(AppState *st, int i, float t, bool reflected, uint64_t state, uint32_t stencil)
+{
+    float x = 2.4f * bx::cos(t * 0.5f + i * 2.094f);
+    float y = 0.4f + 0.6f * bx::sin(t + i);
+    float z = 2.4f * bx::sin(t * 0.5f + i * 2.094f);
+    float ang = t + i;
+
+    float rot[16]; bx::mtxRotateY(rot, ang);
+    float model[16];
+    if (!reflected) {
+        float trn[16]; bx::mtxTranslate(trn, x, y, z);
+        bx::mtxMul(model, rot, trn);
+    } else {
+        float scl[16], tmp[16], trn[16];
+        bx::mtxScale(scl, 1.0f, -1.0f, 1.0f);                 // mirror about the plane
+        bx::mtxMul(tmp, rot, scl);
+        bx::mtxTranslate(trn, x, 2.0f * FLOOR_Y - y, z);      // reflected height
+        bx::mtxMul(model, tmp, trn);
+    }
+    float col[4] = { kCol[i][0], kCol[i][1], kCol[i][2], 1.0f };
+    bgfx::setUniform(st-&gt;u_color, col);
+    bgfx::setTransform(model);
+    bgfx::setVertexBuffer(0, st-&gt;cubeVbh);
+    bgfx::setIndexBuffer(st-&gt;cubeIbh);
+    if (stencil) bgfx::setStencil(stencil);
+    bgfx::setState(state);
+    bgfx::submit(0, st-&gt;program);
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (float)(SDL_GetTicksNS() - st-&gt;startNs) / 1.0e9f;
+
+    bgfx::setViewRect(0, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+    const bx::Vec3 at = { 0, -0.3f, 0 }, eye = { 0, 2.2f, -7.5f };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 55.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 100.0f, bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(0, view, proj);
+
+    float identity[16]; bx::mtxIdentity(identity);
+    float floorCol[4] = { 0.15f, 0.17f, 0.22f, 1.0f };
+
+    // --- Step 1: mark the floor into the stencil buffer (no colour / depth write) ---
+    bgfx::setUniform(st-&gt;u_color, floorCol);
+    bgfx::setTransform(identity);
+    bgfx::setVertexBuffer(0, st-&gt;floorVbh);
+    bgfx::setIndexBuffer(st-&gt;floorIbh);
+    bgfx::setStencil(BGFX_STENCIL_TEST_ALWAYS
+                   | BGFX_STENCIL_FUNC_REF(1) | BGFX_STENCIL_FUNC_RMASK(0xff)
+                   | BGFX_STENCIL_OP_FAIL_S_KEEP | BGFX_STENCIL_OP_FAIL_Z_KEEP
+                   | BGFX_STENCIL_OP_PASS_Z_REPLACE);
+    bgfx::setState(BGFX_STATE_DEPTH_TEST_LESS);
+    bgfx::submit(0, st-&gt;program);
+
+    // --- Step 2: reflected cubes, only where stencil == 1, flipped winding ---
+    uint64_t reflState = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z
+                       | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CCW;
+    uint32_t reflStencil = BGFX_STENCIL_TEST_EQUAL | BGFX_STENCIL_FUNC_REF(1) | BGFX_STENCIL_FUNC_RMASK(0xff)
+                         | BGFX_STENCIL_OP_FAIL_S_KEEP | BGFX_STENCIL_OP_FAIL_Z_KEEP | BGFX_STENCIL_OP_PASS_Z_KEEP;
+    for (int i = 0; i &lt; 3; ++i) submitCube(st, i, t, /*reflected=*/true, reflState, reflStencil);
+
+    // --- Step 3: translucent floor over the reflection (no depth write so it blends in place) ---
+    float floorTint[4] = { 0.15f, 0.17f, 0.22f, 0.55f };
+    bgfx::setUniform(st-&gt;u_color, floorTint);
+    bgfx::setTransform(identity);
+    bgfx::setVertexBuffer(0, st-&gt;floorVbh);
+    bgfx::setIndexBuffer(st-&gt;floorIbh);
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_BLEND_ALPHA);
+    bgfx::submit(0, st-&gt;program);
+
+    // --- Step 4: the upright cubes, normal state ---
+    for (int i = 0; i &lt; 3; ++i) submitCube(st, i, t, /*reflected=*/false, BGFX_STATE_DEFAULT, 0);
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (bgfx::isValid(st-&gt;u_color))  bgfx::destroy(st-&gt;u_color);
+    if (bgfx::isValid(st-&gt;floorIbh)) bgfx::destroy(st-&gt;floorIbh);
+    if (bgfx::isValid(st-&gt;floorVbh)) bgfx::destroy(st-&gt;floorVbh);
+    if (bgfx::isValid(st-&gt;cubeIbh))  bgfx::destroy(st-&gt;cubeIbh);
+    if (bgfx::isValid(st-&gt;cubeVbh))  bgfx::destroy(st-&gt;cubeVbh);
+    if (bgfx::isValid(st-&gt;program))  bgfx::destroy(st-&gt;program);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+<pre><code># vs_solid.sc / fs_solid.sc — flat material colour with one directional light
+# (vs)
+$input  a_position, a_normal
+$output v_normal
+#include "bgfx_shader.sh"
+void main() {
+    vec4 wpos   = mul(u_model[0], vec4(a_position, 1.0));
+    v_normal    = normalize(mul(u_model[0], vec4(a_normal, 0.0)).xyz);
+    gl_Position = mul(u_viewProj, wpos);
+}
+# (fs)
+$input v_normal
+#include "bgfx_shader.sh"
+uniform vec4 u_color;
+void main() {
+    vec3  L = normalize(vec3(0.4, 1.0, -0.3));
+    float d = max(dot(normalize(v_normal), L), 0.0);
+    gl_FragColor = vec4(u_color.xyz * (0.25 + 0.75 * d), u_color.w);
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Selection outline with the same buffer: draw an object writing stencil = 1, then draw a slightly scaled-up copy with <code>STENCIL_TEST_NOTEQUAL</code> 1 in a flat colour and depth test off — a clean silhouette halo.</li>
+        <li>Fade the reflection with distance: in <code>fs_solid</code> darken by world height so the mirror image dims as it recedes under the floor.</li>
+        <li>Tilt the mirror: reflect about an arbitrary plane by building a true reflection matrix instead of the axis-aligned <code>scale(1,-1,1)</code>.</li>
+        <li>Clip below the floor explicitly: add a user clip plane (or discard <code>v_wpos.y &gt; FLOOR_Y</code> in the reflected pass) so nothing pokes above the mirror.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="22-compute-particles.html">← Prev: Compute Particles</a>
+    <a href="index.html">Index</a>
+    <a href="24-deferred-rendering.html">Next: Deferred Rendering →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 23
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>22 · Camera &amp; Parallax Scrolling — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>22. Camera &amp; Parallax Scrolling</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 22 — Camera &amp; Parallax Scrolling</h1>
+    <p class="tagline">
+        Wrap world-to-screen conversion in a tiny <code>Camera</code>, follow a
+        player with smoothing, then scroll several procedural background layers at
+        fractional rates so distant scenery drifts slower than the foreground —
+        the depth illusion every side-scroller leans on.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>A reusable <code>Camera</code> that maps world coordinates to screen coordinates (pan + zoom).</li>
+        <li>Smooth, frame-rate-independent camera follow with an exponential lerp.</li>
+        <li>The parallax trick: scroll each layer by <code>camera.x · depth</code>, where depth ∈ (0, 1].</li>
+        <li>Tiling infinite repeating scenery with a modulo loop instead of storing every object.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="10-tilemap-rendering.html">Recipe 10 — Tilemap Rendering</a>
+        introduced a scrolling camera offset; this recipe promotes that idea to a
+        proper <code>Camera</code> abstraction and layers it for depth.
+        <a href="04-delta-time.html">Recipe 04</a> supplies the delta-time the
+        smoothing needs.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The camera as a coordinate transform</h3>
+    <p>
+        A 2D camera is nothing more than a translation (and optional scale) applied
+        to every world point before it's drawn. Store the world point the camera is
+        centred on, and convert by subtracting it, scaling by zoom, and shifting to
+        the screen centre.
+    </p>
+<pre><code class="language-cpp">struct Camera { float x = 0, y = 0, zoom = 1.0f; };
+
+static float world_to_screen_x(const Camera &amp;c, float wx, int sw)
+{
+    return (wx - c.x) * c.zoom + sw * 0.5f;   // c.x ends up at the screen centre
+}
+</code></pre>
+
+    <h3>Follow with a smoothed lerp</h3>
+    <p>
+        Snapping the camera straight to the player is jarring. Instead ease toward
+        the target each frame. A raw <code>lerp(cam, target, k)</code> is
+        frame-rate dependent, so we derive <code>k</code> from <code>dt</code> with
+        an exponential — the same smoothing at 60 and 144 fps.
+    </p>
+<pre><code class="language-cpp">float k = 1.0f - SDL_expf(-8.0f * dt);     // frame-rate-independent smoothing
+st-&gt;cam.x += (st-&gt;player_x - st-&gt;cam.x) * k;
+</code></pre>
+
+    <h3>Parallax: scale the scroll by depth</h3>
+    <p>
+        Each background layer scrolls by the camera's position multiplied by a
+        <strong>depth</strong> factor. A far layer at <code>depth = 0.1</code>
+        moves a tenth as fast as the foreground (<code>depth = 1.0</code>), so it
+        reads as distant. The whole effect is one multiply per layer.
+    </p>
+<pre><code class="language-cpp">float scroll = st-&gt;cam.x * layer_depth;     // 0.1 = far, 1.0 = foreground plane
+</code></pre>
+
+    <h3>Infinite scenery with a modulo loop</h3>
+    <p>
+        We don't store the hills — we generate them. Given a repeat
+        <code>period</code>, find which copies fall within the screen and draw only
+        those. A deterministic hash of the copy index varies each hill's height so
+        the ridge never looks tiled.
+    </p>
+<pre><code class="language-cpp">int first = (int)SDL_floorf(scroll / period) - 1;
+int last  = (int)SDL_floorf((scroll + sw) / period) + 1;
+for (int k = first; k &lt;= last; ++k) {
+    float sx = k * period - scroll;        // screen x of copy k
+    /* draw one motif at sx */
+}
+</code></pre>
+
+    <div class="note">
+        <strong>Depth ordering matters.</strong> Draw back-to-front: sky, far
+        layers, near layers, then the player and foreground. Painter's-algorithm
+        layering is what sells the parallax — a near hill must occlude a far one.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Drive a glider left and right with the arrow keys. The camera eases to
+        follow it while four procedurally generated layers — stars, two hill
+        ridges and the ground — scroll at increasing rates, so the world feels deep
+        even though it's all flat shapes.
+    </p>
+<pre><code class="language-cpp">/*
+ * 22-camera-and-parallax.cpp — a Camera abstraction with smoothed follow and
+ * multi-layer parallax scrolling, all procedural.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include "gfx.hpp"
+
+static const int WIN_W = 800, WIN_H = 450;
+
+struct Camera { float x = 0, y = 0, zoom = 1.0f; };
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    Camera cam;
+    float  player_x = 0, player_y = WIN_H - 120.0f;
+    Uint64 last_ns = 0;
+};
+
+/* Cheap deterministic hash -&gt; 0..1, so repeated scenery looks varied but stable. */
+static float hash01(int k)
+{
+    Uint32 h = (Uint32)k * 2654435761u;
+    h ^= h &gt;&gt; 15;
+    return (h &amp; 0xffff) / 65535.0f;
+}
+
+static float world_to_screen_x(const Camera &amp;c, float wx) { return (wx - c.x) * c.zoom + WIN_W * 0.5f; }
+
+/* One ridge of repeating triangular hills, scrolled by `scroll`. */
+static void draw_hills(SDL_Renderer *r, float scroll, float base_y, float min_h, float max_h,
+                       float period, Uint8 cr, Uint8 cg, Uint8 cb)
+{
+    gfx::set_color(r, cr, cg, cb, 255);
+    int first = (int)SDL_floorf(scroll / period) - 1;
+    int last  = (int)SDL_floorf((scroll + WIN_W) / period) + 1;
+    for (int k = first; k &lt;= last; ++k) {
+        float sx = k * period - scroll;
+        float h  = min_h + hash01(k) * (max_h - min_h);
+        gfx::fill_triangle(r, sx - period * 0.6f, base_y, sx, base_y - h, sx + period * 0.6f, base_y);
+    }
+    gfx::fill_rect(r, 0, base_y, (float)WIN_W, (float)WIN_H - base_y);  // fill below the ridge
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Camera and Parallax", "1.0", "com.example.sdl3.parallax");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Camera and Parallax", WIN_W, WIN_H, 0,
+                                     &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+    st-&gt;cam.x = st-&gt;player_x;
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *e)
+{
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE)
+        return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    // --- input: move the player, ease the camera to follow ---
+    const bool *keys = SDL_GetKeyboardState(nullptr);
+    float speed = 320.0f;
+    if (keys[SDL_SCANCODE_LEFT])  st-&gt;player_x -= speed * dt;
+    if (keys[SDL_SCANCODE_RIGHT]) st-&gt;player_x += speed * dt;
+
+    float k = 1.0f - SDL_expf(-8.0f * dt);          // frame-rate-independent smoothing
+    st-&gt;cam.x += (st-&gt;player_x - st-&gt;cam.x) * k;
+
+    // --- draw back to front ---
+    gfx::clear(st-&gt;renderer, 24, 26, 42);            // night sky
+
+    // stars (depth 0.10)
+    float star_scroll = st-&gt;cam.x * 0.10f;
+    int sfirst = (int)SDL_floorf(star_scroll / 60.0f) - 1;
+    int slast  = (int)SDL_floorf((star_scroll + WIN_W) / 60.0f) + 1;
+    gfx::set_color(st-&gt;renderer, 220, 224, 255, 255);
+    for (int i = sfirst; i &lt;= slast; ++i) {
+        float sx = i * 60.0f - star_scroll;
+        float sy = 20.0f + hash01(i * 7 + 1) * 180.0f;
+        gfx::fill_rect(st-&gt;renderer, sx, sy, 2, 2);
+    }
+
+    draw_hills(st-&gt;renderer, st-&gt;cam.x * 0.30f, 300, 60, 130, 260, 46, 52, 86);   // far ridge
+    draw_hills(st-&gt;renderer, st-&gt;cam.x * 0.60f, 360, 80, 170, 200, 64, 74, 120);  // near ridge
+    draw_hills(st-&gt;renderer, st-&gt;cam.x * 1.00f, 410, 30,  60, 150, 86, 102, 150);  // ground
+
+    // player (foreground plane, depth 1.0)
+    float px = world_to_screen_x(st-&gt;cam, st-&gt;player_x);
+    gfx::set_color(st-&gt;renderer, 255, 210, 120, 255);
+    gfx::fill_triangle(st-&gt;renderer, px - 18, st-&gt;player_y, px + 22, st-&gt;player_y - 6, px - 18, st-&gt;player_y - 16);
+    gfx::set_color(st-&gt;renderer, 255, 150, 90, 255);
+    gfx::fill_rect(st-&gt;renderer, px - 6, st-&gt;player_y - 12, 10, 6);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Add vertical parallax: let the player jump, follow with <code>cam.y</code>, and scale each layer's vertical scroll by the same depth factor.</li>
+        <li>Animate zoom — bind <code>+</code>/<code>-</code> to <code>cam.zoom</code>. Note the foreground scales while distant layers barely react, reinforcing the depth.</li>
+        <li>Add a fifth, ultra-near layer at <code>depth = 1.3</code> (a few foreground grass blades). Layers can scroll <em>faster</em> than the player for an aggressive in-your-face effect.</li>
+        <li>Introduce a dead-zone: only move the camera once the player drifts more than 80px from centre, so small movements don't shift the world.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="21-clipping-and-viewports.html">← 21. Clipping &amp; Viewports</a>
+    <a href="index.html">Index</a>
+    <a href="23-tweening-and-easing.html">Next: Tweening &amp; Easing →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 22
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

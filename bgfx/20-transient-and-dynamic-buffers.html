@@ -318,24 +318,23 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         <li>Draw thousands of debug lines: bump <code>kRibbon</code> hard, or stack many ribbons, and watch the frame stay cheap — per-frame transient geometry is built for exactly this.</li>
     </ol>
     <p>
-        And that's the bgfx track. You started by
+        That covers buffer management end to end. You started by
         <a href="01-hello-bgfx.html">handing SDL3's native window handle to
         bgfx</a> — the one trick the 2D and 3D tracks never need — then climbed
         through shaders, buffers and transforms; textures, views and instancing;
         the lit, textured <a href="12-capstone-scene.html">capstone</a>; mesh
-        loading, mouse picking, post-processing and GPU compute; and finally
-        skybox cubemaps, normal and shadow mapping, and these transient and
-        dynamic buffers. The same four SDL3 callbacks carried every one of them.
-        Head back to the <a href="../index.html">track picker</a> to see how the
-        same ideas land in SDL_Renderer and SDL_GPU — three renderers, one window,
-        your choice.
+        loading, mouse picking, post-processing and GPU compute; and skybox
+        cubemaps, normal and shadow mapping, and these transient and dynamic
+        buffers. The last few recipes push into modern shading — PBR with
+        image-based lighting, a flow-field <a href="22-compute-particles.html">GPU
+        particle system</a>, the stencil buffer, and a deferred renderer.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="19-shadow-mapping.html">← Prev: Shadow Mapping</a>
     <a href="index.html">Index</a>
-    <a href="../index.html">All tracks →</a>
+    <a href="21-pbr-and-ibl.html">Next: PBR &amp; Image-Based Lighting →</a>
 </nav>
 
 </main>

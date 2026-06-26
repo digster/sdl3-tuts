@@ -314,22 +314,22 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         <li>Replace <code>SDL_BLENDMODE_MOD</code> with a custom mode from <code>SDL_ComposeCustomBlendMode</code> and dial the factors yourself — try a half-strength multiply so shadows never go fully black.</li>
     </ol>
     <p>
-        And that's the 2D track. You started at
-        <a href="01-hello-window.html">a blank window</a> and worked through
-        input, delta-time movement, textures and animation, audio and mixing,
-        collision, save/load and UI, an offscreen render-target pipeline — and
-        these last four recipes carried you past axis-aligned blits into custom
-        meshes, sprite transforms, a deterministic fixed-timestep loop, and a 2D
-        lighting pass. That's the full toolkit for a polished 2D game in SDL3.
-        When you're ready for the third dimension, the
-        <a href="../3d/index.html">3D Track</a> picks up where this leaves off.
+        That covers the rendering toolkit: from
+        <a href="01-hello-window.html">a blank window</a> through input,
+        delta-time movement, textures and animation, audio and mixing, collision,
+        save/load and UI, an offscreen render-target pipeline, custom meshes,
+        sprite transforms, a deterministic fixed-timestep loop and a 2D lighting
+        pass. The next few recipes step up from drawing to <em>structure</em> —
+        carving the window into <a href="21-clipping-and-viewports.html">viewports
+        and clip regions</a>, a follow camera with parallax, tweened motion, and
+        the scene stack that holds a whole game together.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="19-fixed-timestep.html">← 19. Fixed Timestep</a>
     <a href="index.html">Index</a>
-    <a href="../3d/index.html">3D Track →</a>
+    <a href="21-clipping-and-viewports.html">Next: Clipping &amp; Viewports →</a>
 </nav>
 
 </main>

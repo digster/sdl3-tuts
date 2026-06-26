@@ -41,3 +41,23 @@ stack, MIT license) and a companion `ARCHITECTURE.md` (zero-build static
 sub-site, the parent `sdl3-2d` template relationship that explains the
 intentional outward links, page topology, and contributor conventions). No site
 pages changed.
+
+---
+
+## 2026-06-26
+
+> Add more tuts across the tracks.
+
+Added 12 more recipes — four per track, append-only — pushing each track into new
+advanced territory (the prior cross-track gaps were already closed). **2D (21–24):**
+Clipping &amp; Viewports · Camera &amp; Parallax Scrolling · Tweening &amp; Easing ·
+Scene/State Stack. **3D (22–25):** Point &amp; Spot Lights · Tone Mapping &amp; Gamma
+· Environment Reflections · Deferred Shading (MRT). **bgfx (21–24):** PBR &amp;
+Image-Based Lighting · Compute Particles (flow field) · Stencil Reflections &amp;
+Outlines · Deferred Rendering (MRT). Re-wired each track's footer `Next →` and
+softened the now-mid-track finales; the new last recipe of each track inherited the
+cross-track terminator. Bumped every count to 24/25/24 (track indexes, root cards,
+hero ledes, "at a glance" lists, the 3D "How to run" ranges → 14–25). Verified
+structurally: 24/25/24 files, 852 internal links 0 broken, 0 unescaped
+`<`/`>`/`&amp;` in code blocks, Prism `prism → c → cpp` order, threaded footer
+chains, plus a browser render spot-check.

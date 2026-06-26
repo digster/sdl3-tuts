@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>24 · Deferred Rendering — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>24. Deferred Rendering</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 24 — Deferred Rendering</h1>
+    <p class="tagline">
+        Build a G-buffer the bgfx way. A multi-render-target framebuffer captures
+        albedo, normal and position in one geometry view; a second fullscreen view
+        lights the screen from it — many lights, one rasterisation of the scene.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>A multi-attachment <code>FrameBuffer</code> from several RT textures (MRT) via <code>createFrameBuffer</code>.</li>
+        <li>Writing each G-buffer channel with <code>gl_FragData[0..2]</code>.</li>
+        <li>Reading the attachments back with <code>bgfx::getTexture(fb, i)</code> for the lighting pass.</li>
+        <li>A fullscreen lighting view that loops many point lights over the G-buffer.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="10-views-and-render-to-texture.html">Recipe 10 — Views &amp;
+        Render-to-Texture</a> for framebuffers and the view model, and
+        <a href="15-post-processing-and-bloom.html">recipe 15</a> for the
+        transient fullscreen triangle. This is the bgfx counterpart to
+        <a href="../3d/25-deferred-shading.html">3D recipe 25</a>.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>A framebuffer with several colour attachments</h3>
+    <p>
+        bgfx builds an MRT target by handing <code>createFrameBuffer</code> an array
+        of RT textures plus a depth target. Albedo fits in <code>RGBA8</code>;
+        normals and positions need <code>RGBA16F</code> so signed, unbounded values
+        survive.
+    </p>
+<pre><code class="language-cpp">uint64_t rt = BGFX_TEXTURE_RT | BGFX_SAMPLER_POINT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+bgfx::TextureHandle att[4] = {
+    bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::RGBA8,    rt),  // albedo
+    bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::RGBA16F,  rt),  // normal
+    bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::RGBA16F,  rt),  // position
+    bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY),
+};
+st-&gt;gbuffer = bgfx::createFrameBuffer(4, att, /*destroyTextures=*/true);
+</code></pre>
+
+    <h3>One fragment shader, three outputs</h3>
+    <p>
+        The geometry program writes all three channels through
+        <code>gl_FragData</code>. View 0 points at the G-buffer framebuffer, so a
+        single draw of the scene fills albedo, normal and position at once.
+    </p>
+<pre><code># fs_gbuffer.sc
+$input v_wpos, v_normal
+#include "bgfx_shader.sh"
+uniform vec4 u_color;
+void main() {
+    gl_FragData[0] = u_color;                       // albedo
+    gl_FragData[1] = vec4(normalize(v_normal), 1.0);// world normal (float target: raw)
+    gl_FragData[2] = vec4(v_wpos, 1.0);             // world position
+}
+</code></pre>
+
+    <h3>Light the screen from the attachments</h3>
+    <p>
+        View 1 targets the backbuffer. Bind the three attachments — fetched with
+        <code>bgfx::getTexture(st-&gt;gbuffer, i)</code> — to three samplers, draw the
+        fullscreen triangle, and loop the lights per pixel.
+    </p>
+<pre><code class="language-cpp">bgfx::setViewFrameBuffer(1, BGFX_INVALID_HANDLE);          // back to the screen
+bgfx::setTexture(0, st-&gt;s_albedo,   bgfx::getTexture(st-&gt;gbuffer, 0));
+bgfx::setTexture(1, st-&gt;s_normal,   bgfx::getTexture(st-&gt;gbuffer, 1));
+bgfx::setTexture(2, st-&gt;s_position, bgfx::getTexture(st-&gt;gbuffer, 2));
+screenTri(st);
+bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);  // no depth: fullscreen
+bgfx::submit(1, st-&gt;light);
+</code></pre>
+
+    <div class="note">
+        <strong>Same idea, two renderers.</strong> This mirrors
+        <a href="../3d/25-deferred-shading.html">SDL_GPU recipe 25</a> beat for
+        beat — geometry into an MRT target, then a screen-space lighting pass. Only
+        the API surface differs: bgfx's <code>FrameBuffer</code> + views versus
+        SDL_GPU's colour-target arrays.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A ring of cubes over a floor, rasterised once into a three-target G-buffer
+        and lit by sixteen orbiting point lights in a fullscreen pass. Native-handle
+        / <code>loadProgram</code> helpers identical to recipe 03 (elided). Shaders:
+        <code>vs_gbuffer</code> / <code>fs_gbuffer</code>, <code>vs_fullscreen</code>
+        / <code>fs_light</code>.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/24-deferred-rendering.cpp — MRT G-buffer + a fullscreen lighting pass.
+ * Native-handle + loadProgram helpers identical to recipe 03 (elided).
+ * Shaders: vs_gbuffer/fs_gbuffer, vs_fullscreen/fs_light.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+
+struct PNVertex { float px, py, pz; float nx, ny, nz; };
+struct PosUvVertex { float x, y; float u, v; };
+
+static const PNVertex kCube[24] = {
+    {  0.5f,-0.5f,-0.5f, 1,0,0 },{  0.5f, 0.5f,-0.5f, 1,0,0 },{  0.5f, 0.5f, 0.5f, 1,0,0 },{  0.5f,-0.5f, 0.5f, 1,0,0 },
+    { -0.5f,-0.5f, 0.5f,-1,0,0 },{ -0.5f, 0.5f, 0.5f,-1,0,0 },{ -0.5f, 0.5f,-0.5f,-1,0,0 },{ -0.5f,-0.5f,-0.5f,-1,0,0 },
+    { -0.5f, 0.5f,-0.5f, 0,1,0 },{ -0.5f, 0.5f, 0.5f, 0,1,0 },{  0.5f, 0.5f, 0.5f, 0,1,0 },{  0.5f, 0.5f,-0.5f, 0,1,0 },
+    { -0.5f,-0.5f, 0.5f, 0,-1,0 },{ -0.5f,-0.5f,-0.5f, 0,-1,0 },{  0.5f,-0.5f,-0.5f, 0,-1,0 },{  0.5f,-0.5f, 0.5f, 0,-1,0 },
+    { -0.5f,-0.5f, 0.5f, 0,0,1 },{  0.5f,-0.5f, 0.5f, 0,0,1 },{  0.5f, 0.5f, 0.5f, 0,0,1 },{ -0.5f, 0.5f, 0.5f, 0,0,1 },
+    {  0.5f,-0.5f,-0.5f, 0,0,-1 },{ -0.5f,-0.5f,-0.5f, 0,0,-1 },{ -0.5f, 0.5f,-0.5f, 0,0,-1 },{  0.5f, 0.5f,-0.5f, 0,0,-1 },
+};
+static const uint16_t kIdx[36] = {
+    0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+    12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23,
+};
+
+#define NUM_LIGHTS 16
+
+struct AppState {
+    SDL_Window *window = nullptr; int width = 1280, height = 720, fbW = 0, fbH = 0;
+    bgfx::VertexLayout layout, quadLayout;
+    bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
+    bgfx::IndexBufferHandle  ibh = BGFX_INVALID_HANDLE;
+    bgfx::FrameBufferHandle  gbuffer = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle geom = BGFX_INVALID_HANDLE, light = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_color = BGFX_INVALID_HANDLE, u_eyePos = BGFX_INVALID_HANDLE, u_params = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_lightPosRange = BGFX_INVALID_HANDLE, u_lightColor = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle s_albedo = BGFX_INVALID_HANDLE, s_normal = BGFX_INVALID_HANDLE, s_position = BGFX_INVALID_HANDLE;
+    Uint64 startNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+// (Re)build the three-target G-buffer + depth at the current size.
+static void makeGBuffer(AppState *st, int w, int h)
+{
+    if (bgfx::isValid(st-&gt;gbuffer)) bgfx::destroy(st-&gt;gbuffer);   // also frees its textures
+    uint64_t rt = BGFX_TEXTURE_RT | BGFX_SAMPLER_POINT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+    bgfx::TextureHandle att[4] = {
+        bgfx::createTexture2D((uint16_t)w, (uint16_t)h, false, 1, bgfx::TextureFormat::RGBA8,   rt),
+        bgfx::createTexture2D((uint16_t)w, (uint16_t)h, false, 1, bgfx::TextureFormat::RGBA16F, rt),
+        bgfx::createTexture2D((uint16_t)w, (uint16_t)h, false, 1, bgfx::TextureFormat::RGBA16F, rt),
+        bgfx::createTexture2D((uint16_t)w, (uint16_t)h, false, 1, bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY),
+    };
+    st-&gt;gbuffer = bgfx::createFrameBuffer(4, att, true);
+    st-&gt;fbW = w; st-&gt;fbH = h;
+}
+
+// Allocate + bind a clip-space fullscreen triangle (V flipped on top-left-origin backends).
+static void screenTri(AppState *st)
+{
+    if (bgfx::getAvailTransientVertexBuffer(3, st-&gt;quadLayout) != 3) return;
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::allocTransientVertexBuffer(&amp;tvb, 3, st-&gt;quadLayout);
+    PosUvVertex *v = (PosUvVertex *)tvb.data;
+    bool flip = !bgfx::getCaps()-&gt;originBottomLeft;
+    float vb = flip ? 1.0f : 0.0f, vt = flip ? -1.0f : 2.0f;
+    v[0] = { -1.0f, -1.0f, 0.0f, vb };
+    v[1] = {  3.0f, -1.0f, 2.0f, vb };
+    v[2] = { -1.0f,  3.0f, 0.0f, vt };
+    bgfx::setVertexBuffer(0, &amp;tvb);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx Deferred", "1.0", "com.example.sdl3.bgfx.deferred");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — Deferred Rendering", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type = bgfx::RendererType::Count;
+    init.platformData.nwh = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width = (uint32_t)st-&gt;width; init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+
+    st-&gt;layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Normal,   3, bgfx::AttribType::Float).end();
+    st-&gt;quadLayout.begin()
+        .add(bgfx::Attrib::Position,  2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float).end();
+    st-&gt;vbh = bgfx::createVertexBuffer(bgfx::makeRef(kCube, sizeof(kCube)), st-&gt;layout);
+    st-&gt;ibh = bgfx::createIndexBuffer (bgfx::makeRef(kIdx, sizeof(kIdx)));
+    st-&gt;geom  = loadProgram("vs_gbuffer",    "fs_gbuffer");
+    st-&gt;light = loadProgram("vs_fullscreen", "fs_light");
+    st-&gt;u_color         = bgfx::createUniform("u_color",         bgfx::UniformType::Vec4);
+    st-&gt;u_eyePos        = bgfx::createUniform("u_eyePos",        bgfx::UniformType::Vec4);
+    st-&gt;u_params        = bgfx::createUniform("u_params",        bgfx::UniformType::Vec4);
+    st-&gt;u_lightPosRange = bgfx::createUniform("u_lightPosRange", bgfx::UniformType::Vec4, NUM_LIGHTS);
+    st-&gt;u_lightColor    = bgfx::createUniform("u_lightColor",    bgfx::UniformType::Vec4, NUM_LIGHTS);
+    st-&gt;s_albedo   = bgfx::createUniform("s_albedo",   bgfx::UniformType::Sampler);
+    st-&gt;s_normal   = bgfx::createUniform("s_normal",   bgfx::UniformType::Sampler);
+    st-&gt;s_position = bgfx::createUniform("s_position", bgfx::UniformType::Sampler);
+    if (!bgfx::isValid(st-&gt;geom) || !bgfx::isValid(st-&gt;light)) return fail("loadProgram");
+
+    makeGBuffer(st, st-&gt;width, st-&gt;height);
+    st-&gt;startNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+        makeGBuffer(st, st-&gt;width, st-&gt;height);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+static void drawCube(AppState *st, const float *model, float r, float g, float b)
+{
+    float col[4] = { r, g, b, 1.0f };
+    bgfx::setUniform(st-&gt;u_color, col);
+    bgfx::setTransform(model);
+    bgfx::setVertexBuffer(0, st-&gt;vbh);
+    bgfx::setIndexBuffer(st-&gt;ibh);
+    bgfx::setState(BGFX_STATE_DEFAULT);
+    bgfx::submit(0, st-&gt;geom);
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (float)(SDL_GetTicksNS() - st-&gt;startNs) / 1.0e9f;
+
+    // --- view 0: geometry into the G-buffer ---
+    bgfx::setViewFrameBuffer(0, st-&gt;gbuffer);
+    bgfx::setViewRect(0, 0, 0, (uint16_t)st-&gt;fbW, (uint16_t)st-&gt;fbH);
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x00000000, 1.0f, 0);   // normal=0 ⇒ background
+    const bx::Vec3 at = { 0, 0, 0 }, eye = { 0, 3.5f, -9.0f };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 55.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 100.0f, bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(0, view, proj);
+
+    float floor[16], s[16], tr[16];
+    bx::mtxScale(s, 12.0f, 0.2f, 12.0f);
+    bx::mtxTranslate(tr, 0.0f, -1.2f, 0.0f);
+    bx::mtxMul(floor, s, tr);
+    drawCube(st, floor, 0.8f, 0.8f, 0.85f);
+    for (int i = 0; i &lt; 8; ++i) {
+        float a = i / 8.0f * 6.2831853f;
+        float rot[16], pos[16], model[16];
+        bx::mtxRotateY(rot, t + a);
+        bx::mtxTranslate(pos, 3.2f * bx::cos(a), -0.4f, 3.2f * bx::sin(a));
+        bx::mtxMul(model, rot, pos);
+        drawCube(st, model, 0.85f, 0.8f, 0.75f);
+    }
+
+    // --- view 1: fullscreen lighting from the G-buffer ---
+    bgfx::setViewFrameBuffer(1, BGFX_INVALID_HANDLE);
+    bgfx::setViewRect(1, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+    bgfx::setViewClear(1, BGFX_CLEAR_COLOR, 0x05060aff, 1.0f, 0);
+
+    float eyev[4] = { eye.x, eye.y, eye.z, 0 };
+    bgfx::setUniform(st-&gt;u_eyePos, eyev);
+    float params[4] = { (float)NUM_LIGHTS, 0, 0, 0 };
+    bgfx::setUniform(st-&gt;u_params, params);
+    float lpos[NUM_LIGHTS][4], lcol[NUM_LIGHTS][4];
+    for (int i = 0; i &lt; NUM_LIGHTS; ++i) {
+        float a = t * 0.6f + i / (float)NUM_LIGHTS * 6.2831853f;
+        lpos[i][0] = 3.4f * bx::cos(a);
+        lpos[i][1] = 0.4f + bx::sin(t + i) * 0.6f;
+        lpos[i][2] = 3.4f * bx::sin(a);
+        lpos[i][3] = 4.5f;                                  // range
+        lcol[i][0] = 0.5f + 0.5f * bx::sin(i * 1.3f);
+        lcol[i][1] = 0.5f + 0.5f * bx::sin(i * 1.3f + 2.0f);
+        lcol[i][2] = 0.5f + 0.5f * bx::sin(i * 1.3f + 4.0f);
+        lcol[i][3] = 1.6f;                                  // intensity
+    }
+    bgfx::setUniform(st-&gt;u_lightPosRange, lpos, NUM_LIGHTS);
+    bgfx::setUniform(st-&gt;u_lightColor,    lcol, NUM_LIGHTS);
+    bgfx::setTexture(0, st-&gt;s_albedo,   bgfx::getTexture(st-&gt;gbuffer, 0));
+    bgfx::setTexture(1, st-&gt;s_normal,   bgfx::getTexture(st-&gt;gbuffer, 1));
+    bgfx::setTexture(2, st-&gt;s_position, bgfx::getTexture(st-&gt;gbuffer, 2));
+    screenTri(st);
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
+    bgfx::submit(1, st-&gt;light);
+
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    bgfx::UniformHandle us[] = { st-&gt;s_position, st-&gt;s_normal, st-&gt;s_albedo, st-&gt;u_lightColor,
+                                 st-&gt;u_lightPosRange, st-&gt;u_params, st-&gt;u_eyePos, st-&gt;u_color };
+    for (bgfx::UniformHandle u : us) if (bgfx::isValid(u)) bgfx::destroy(u);
+    if (bgfx::isValid(st-&gt;gbuffer)) bgfx::destroy(st-&gt;gbuffer);
+    if (bgfx::isValid(st-&gt;ibh))     bgfx::destroy(st-&gt;ibh);
+    if (bgfx::isValid(st-&gt;vbh))     bgfx::destroy(st-&gt;vbh);
+    if (bgfx::isValid(st-&gt;light))   bgfx::destroy(st-&gt;light);
+    if (bgfx::isValid(st-&gt;geom))    bgfx::destroy(st-&gt;geom);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+<pre><code># vs_gbuffer.sc / fs_gbuffer.sc — write albedo, normal, position
+# (vs)
+$input  a_position, a_normal
+$output v_wpos, v_normal
+#include "bgfx_shader.sh"
+void main() {
+    vec4 wpos   = mul(u_model[0], vec4(a_position, 1.0));
+    v_wpos      = wpos.xyz;
+    v_normal    = normalize(mul(u_model[0], vec4(a_normal, 0.0)).xyz);
+    gl_Position = mul(u_viewProj, wpos);
+}
+# (fs)
+$input v_wpos, v_normal
+#include "bgfx_shader.sh"
+uniform vec4 u_color;
+void main() {
+    gl_FragData[0] = u_color;                        // albedo
+    gl_FragData[1] = vec4(normalize(v_normal), 1.0); // world-space normal
+    gl_FragData[2] = vec4(v_wpos, 1.0);              // world-space position
+}
+</code></pre>
+<pre><code># fs_light.sc — screen-space lighting from the G-buffer
+$input v_texcoord0
+#include "bgfx_shader.sh"
+SAMPLER2D(s_albedo,   0);
+SAMPLER2D(s_normal,   1);
+SAMPLER2D(s_position, 2);
+uniform vec4 u_eyePos;
+uniform vec4 u_params;                 // x = light count
+uniform vec4 u_lightPosRange[16];      // xyz position, w range
+uniform vec4 u_lightColor[16];         // rgb colour, w intensity
+void main() {
+    vec3 albedo = texture2D(s_albedo, v_texcoord0).rgb;
+    vec3 N = texture2D(s_normal, v_texcoord0).xyz;
+    if (dot(N, N) &lt; 0.5) { gl_FragColor = vec4(0.02, 0.02, 0.03, 1.0); return; }  // background
+    N = normalize(N);
+    vec3 P = texture2D(s_position, v_texcoord0).xyz;
+    vec3 V = normalize(u_eyePos.xyz - P);
+    vec3 lit = albedo * 0.06;
+    int n = int(u_params.x);
+    for (int i = 0; i &lt; 16; ++i) {
+        if (i &gt;= n) break;
+        vec3  toL  = u_lightPosRange[i].xyz - P;
+        float dist = length(toL);
+        vec3  L    = toL / max(dist, 1e-4);
+        float att  = clamp(1.0 - dist / u_lightPosRange[i].w, 0.0, 1.0); att *= att;
+        float diff = max(dot(N, L), 0.0);
+        float spec = pow(max(dot(N, normalize(L + V)), 0.0), 32.0);
+        lit += (albedo * diff + spec) * u_lightColor[i].xyz * u_lightColor[i].w * att;
+    }
+    gl_FragColor = vec4(lit, 1.0);
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Inspect the G-buffer: point view 1 at one attachment and output it directly (albedo, <code>normal*0.5+0.5</code>, scaled position) to see what deferred stores.</li>
+        <li>Add MRT clear colours with <code>bgfx::setViewClearMrt</code>-style palette clears so each attachment clears to its own value.</li>
+        <li>Light volumes: draw a sphere per light into a stencil-masked region instead of a fullscreen triangle so only affected pixels shade.</li>
+        <li>Reconstruct position from depth instead of storing it, dropping the third attachment to save bandwidth — the standard production optimisation.</li>
+    </ol>
+    <p>
+        And that completes the bgfx track — and the SDL3 Recipes curriculum. You
+        wired SDL3's native window into bgfx, drew your first triangle, then climbed
+        through buffers, transforms, textures, instancing, mesh loading, picking,
+        post-processing, compute, skyboxes, normal and shadow mapping, PBR,
+        particles, the stencil buffer and now a deferred renderer — the same arc you
+        walked in the <a href="../2d/index.html">2D</a> and
+        <a href="../3d/index.html">3D</a> tracks, here on a graphics-API-agnostic
+        renderer. Three renderers, one callback skeleton, learned once and reused
+        everywhere. From here, the natural next step is to build something of your
+        own — the toolkit is complete.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="23-stencil-reflections.html">← Prev: Stencil Reflections &amp; Outlines</a>
+    <a href="index.html">Index</a>
+    <a href="../index.html">All tracks →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 24
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

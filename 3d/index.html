@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>3D Track — SDL3 Recipes</title>
-    <meta name="description" content="Twenty-one C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute, instancing, bloom, transparency and anti-aliasing.">
+    <meta name="description" content="Twenty-five C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute, instancing, bloom, transparency, anti-aliasing, many lights, tone mapping, reflections and deferred shading.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,13 +19,14 @@
 <header class="hero">
     <h1>3D Track</h1>
     <p class="lede">
-        Twenty-one recipes that take you from the "hello triangle" to a textured,
+        Twenty-five recipes that take you from the "hello triangle" to a textured,
         lit cube you can fly around with an FPS camera, then on through
         cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute,
-        and finally the techniques that polish a real renderer: instanced
-        rendering, post-processing bloom, alpha blending and transparency, and
-        anti-aliasing with mipmaps and MSAA. All in C++ using SDL3's
-        <code>SDL_GPU</code> API (Metal / Vulkan / D3D12 under one abstraction).
+        instanced rendering, post-processing bloom, transparency and anti-aliasing,
+        and finally lighting at scale: many point and spot lights, HDR tone
+        mapping, environment reflections and a deferred renderer. All in C++ using
+        SDL3's <code>SDL_GPU</code> API (Metal / Vulkan / D3D12 under one
+        abstraction).
     </p>
 </header>
 
@@ -138,19 +139,39 @@
             <div class="blurb">Two anti-aliasing tools: trilinear mipmaps to stop distant shimmer, and a resolved 4× MSAA target to smooth edges.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
 
+        <li><span class="num">22</span>
+            <span class="title"><a href="22-point-and-spot-lights.html">Point &amp; Spot Lights</a>
+            <div class="blurb">A uniform array of point and spot lights consumed in one forward pass — attenuation, cones, accumulated per pixel.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">23</span>
+            <span class="title"><a href="23-tone-mapping-and-gamma.html">Tone Mapping &amp; Gamma</a>
+            <div class="blurb">Compress an HDR target to the display with Reinhard / ACES plus exposure and gamma — clamping is not tone mapping.</div></span>
+            <span class="badge badge-intermediate">Intermediate</span></li>
+
+        <li><span class="num">24</span>
+            <span class="title"><a href="24-environment-reflections.html">Environment Reflections</a>
+            <div class="blurb">A chrome cube reflecting the skybox cubemap via <code>reflect(I, N)</code>, with a Fresnel rim — same map for sky and mirror.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">25</span>
+            <span class="title"><a href="25-deferred-shading.html">Deferred Shading</a>
+            <div class="blurb">An MRT G-buffer (albedo / normal / position) and a screen-space lighting pass — many lights, geometry drawn once.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
     </ul>
 </section>
 
 <section>
     <h2>How to run the code</h2>
     <p>
-        For recipes 01–12 and 14–21, every <em>Complete listing</em> is a drop-in
+        For recipes 01–12 and 14–25, every <em>Complete listing</em> is a drop-in
         replacement for
         <a href="../../examples/cpp-gpu/triangle.cpp">examples/cpp-gpu/triangle.cpp</a>.
         Replace that file's contents, then build with <code>make run-gpu</code>
         from the repo root. That covers the original recipes through GPU compute
-        as well as the later instancing, bloom, transparency and anti-aliasing
-        listings (18–21).
+        as well as the later instancing, bloom, transparency, anti-aliasing, and
+        the lighting, tone-mapping, reflection and deferred listings (18–25).
     </p>
     <p>
         Recipe 13 lives in the sibling folder
@@ -159,7 +180,7 @@
         with <code>make run-shadercross</code>.
     </p>
     <p>
-        Shaders in recipes 01–12 and 14–21 are written in <strong>Metal Shading
+        Shaders in recipes 01–12 and 14–25 are written in <strong>Metal Shading
         Language (MSL)</strong> and embedded as raw string literals. On macOS that
         compiles at runtime and needs no extra tooling. On other platforms see
         <a href="02-cross-platform-shaders.html">recipe 02</a> for the
