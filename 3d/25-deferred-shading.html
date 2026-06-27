@@ -454,21 +454,18 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         <li>Pack the G-buffer tighter: store depth + reconstruct position from it, dropping the position target entirely to save bandwidth.</li>
     </ol>
     <p>
-        That completes the 3D track. From a single triangle you built a textured,
-        lit cube, flew a camera around it, rendered to offscreen targets, authored
-        cross-platform shaders, and finished with skyboxes, normal and shadow
-        mapping, compute, instancing, HDR bloom, tone mapping, reflections and a
-        deferred renderer — the toolkit of a modern real-time engine. The
-        <a href="../bgfx/index.html">bgfx Track</a> rebuilds this same progression
-        on a different renderer: SDL3 still owns the window and input, while bgfx
-        drives the graphics API, with shaders cross-compiled to every backend.
+        Deferred is the backbone that the last two recipes build on. With the
+        G-buffer in hand, <a href="26-ssao.html">screen-space ambient occlusion</a>
+        adds contact shadow from the same buffers, and the track closes with a
+        GPU-driven particle system — the two techniques that round out a modern
+        real-time renderer.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="24-environment-reflections.html">← 24. Environment Reflections</a>
     <a href="index.html">Index</a>
-    <a href="../bgfx/index.html">bgfx Track →</a>
+    <a href="26-ssao.html">Next: Screen-Space Ambient Occlusion →</a>
 </nav>
 
 </main>

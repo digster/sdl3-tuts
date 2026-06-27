@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>27 · GPU Particles — 3D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">3D Track</a> ›
+    <span>27. GPU Particles</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 27 — GPU Particles</h1>
+    <p class="tagline">
+        Grow the compute fountain into a 3D system. A flow field swirls tens of
+        thousands of particles under a perspective camera, the mouse becomes an
+        attractor, and additive blending turns dense regions into glow — all
+        simulated and drawn without the data ever leaving the GPU.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Taking the recipe-17 compute particle buffer into <strong>3D world space</strong> under an MVP camera.</li>
+        <li>Advecting particles through a procedural <strong>flow field</strong> instead of plain gravity.</li>
+        <li>An interactive <strong>attractor</strong> fed from the mouse into the compute kernel.</li>
+        <li><strong>Additive</strong> point billboards coloured by speed and life.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="17-compute-shaders.html">Recipe 17 — Compute Shaders</a> built the
+        flat 2D fountain and the dispatch-then-draw plumbing; this recipe keeps that
+        machinery and lifts it into 3D. <a href="20-alpha-blending.html">Recipe
+        20</a> supplies the blend state. It's the SDL_GPU twin of
+        <a href="../bgfx/22-compute-particles.html">bgfx recipe 22</a>.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>3D particles, same buffer trick</h3>
+    <p>
+        The particles still live in one buffer flagged
+        <code>VERTEX | COMPUTE_STORAGE_READ | COMPUTE_STORAGE_WRITE</code> — the
+        compute pass simulates it, the render pass draws it, SDL inserts the
+        barrier. The only change from recipe 17 is the data: each particle is now a
+        <code>float4</code> position+life and a <code>float4</code> velocity, in
+        world space.
+    </p>
+<pre><code class="language-cpp">struct Particle { float pos[4]; float vel[4]; };   // pos.xyz + life, vel.xyz
+</code></pre>
+
+    <h3>A flow field plus a mouse attractor</h3>
+    <p>
+        Recipe 17 pushed every particle with the same gravity. Here a cheap
+        sine-based field gives a different velocity at every point in space, and a
+        linear pull toward an attractor (no <code>normalize</code>, so no
+        singularity) lets the mouse stir the swarm.
+    </p>
+<pre><code># cs_particles (excerpt) — params.p0 = (dt, time, count, attractStrength)
+float3 flow = float3(sin(p.y*1.3 + p.z*0.7),
+                     sin(p.z*1.1 + p.x*0.9),
+                     sin(p.x*1.2 + p.y*0.8)) * 1.2;
+flow += (u.attractor.xyz - p.xyz) * u.p0.w;        // pull toward the mouse
+v.xyz = v.xyz * 0.96 + flow * u.p0.x;              // damping
+p.xyz += v.xyz * u.p0.x;
+p.w   -= u.p0.x;                                    // age; respawn when life runs out
+</code></pre>
+
+    <h3>Additive billboards under the camera</h3>
+    <p>
+        The render pipeline draws the buffer as a <code>POINTLIST</code> with the
+        MVP applied in the vertex shader and <code>point_size</code> set for visible
+        billboards. The colour target enables <strong>additive</strong> blending so
+        overlapping particles sum to white in dense regions — the cheapest glow
+        there is.
+    </p>
+<pre><code class="language-cpp">SDL_GPUColorTargetBlendState bs{};
+bs.enable_blend = true;
+bs.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;   // additive
+bs.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+bs.color_blend_op        = SDL_GPU_BLENDOP_ADD;
+bs.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+bs.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+bs.alpha_blend_op        = SDL_GPU_BLENDOP_ADD;
+ct.blend_state = bs;
+</code></pre>
+
+    <div class="note">
+        <strong>The CPU barely works.</strong> As in recipe 17, the CPU only ticks
+        the clock, feeds the mouse, and counts workgroups; born, simulated and drawn
+        entirely on the GPU, this scales to hundreds of thousands of particles. The
+        bgfx track tells the same story with <code>bgfx::Encoder</code> and a
+        dynamic buffer in <a href="../bgfx/22-compute-particles.html">recipe 22</a>.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        65,536 particles advected through a flow field under an orbiting camera,
+        glowing additively, hot where they move fast. Hold the
+        <strong>left mouse button</strong> and move to drag an attractor through the
+        swarm.
+    </p>
+<pre><code class="language-cpp">/*
+ * 27-gpu-particles.cpp — 3D compute particle system: flow field + mouse attractor,
+ * additive point billboards. Compute machinery from recipe 17, blend from recipe 20.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;cstring&gt;
+#include &lt;cstddef&gt;
+#include &lt;vector&gt;
+
+static const int N = 65536;
+
+struct Particle { float pos[4]; float vel[4]; };   // pos.xyz + life, vel.xyz
+
+struct Mat4 { float m[16]; };
+static Mat4 mat4_identity(){ Mat4 r{}; r.m[0]=r.m[5]=r.m[10]=r.m[15]=1; return r; }
+static Mat4 mat4_perspective(float fovy,float aspect,float n,float f){ float t=1/SDL_tanf(fovy*0.5f); Mat4 r{}; r.m[0]=t/aspect; r.m[5]=t; r.m[10]=f/(n-f); r.m[11]=-1; r.m[14]=(n*f)/(n-f); return r;}
+static Mat4 mat4_mul(const Mat4 &amp;a,const Mat4 &amp;b){ Mat4 r{}; for(int c=0;c&lt;4;++c) for(int row=0;row&lt;4;++row){ float s=0; for(int k=0;k&lt;4;++k) s+=a.m[k*4+row]*b.m[c*4+k]; r.m[c*4+row]=s; } return r;}
+static Mat4 mat4_look_at(float ex,float ey,float ez, float cx,float cy,float cz, float ux,float uy,float uz){
+    float fx=cx-ex, fy=cy-ey, fz=cz-ez; float fl=1.0f/SDL_sqrtf(fx*fx+fy*fy+fz*fz); fx*=fl; fy*=fl; fz*=fl;
+    float sx=fy*uz-fz*uy, sy=fz*ux-fx*uz, sz=fx*uy-fy*ux; float sl=1.0f/SDL_sqrtf(sx*sx+sy*sy+sz*sz); sx*=sl; sy*=sl; sz*=sl;
+    float vx=sy*fz-sz*fy, vy=sz*fx-sx*fz, vz=sx*fy-sy*fx;
+    Mat4 r=mat4_identity();
+    r.m[0]=sx; r.m[4]=sy; r.m[8]=sz;
+    r.m[1]=vx; r.m[5]=vy; r.m[9]=vz;
+    r.m[2]=-fx; r.m[6]=-fy; r.m[10]=-fz;
+    r.m[12]=-(sx*ex+sy*ey+sz*ez); r.m[13]=-(vx*ex+vy*ey+vz*ez); r.m[14]=(fx*ex+fy*ey+fz*ez);
+    return r;
+}
+
+static const char *kCompute = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct Particle { float4 pos; float4 vel; };
+struct Params   { float4 p0; float4 attractor; };   // p0 = (dt, time, count, attract)
+static float hash(float n) { return fract(sin(n) * 43758.5453); }
+kernel void cs(constant Params &amp;u [[buffer(0)]], device Particle *pt [[buffer(1)]],
+               uint id [[thread_position_in_grid]]) {
+    if (float(id) &gt;= u.p0.z) return;
+    float4 p = pt[id].pos;
+    float4 v = pt[id].vel;
+    float3 flow = float3(sin(p.y*1.3 + p.z*0.7),
+                         sin(p.z*1.1 + p.x*0.9),
+                         sin(p.x*1.2 + p.y*0.8)) * 1.2;
+    flow += (u.attractor.xyz - p.xyz) * u.p0.w;       // linear pull, no singularity
+    v.xyz = v.xyz * 0.96 + flow * u.p0.x;
+    p.xyz += v.xyz * u.p0.x;
+    p.w   -= u.p0.x;
+    if (p.w &lt;= 0.0) {                                  // respawn in the seed volume
+        float r  = hash(float(id) * 12.9898 + u.p0.y);
+        float r2 = hash(float(id) * 78.233  + u.p0.y);
+        float r3 = hash(float(id) * 37.719  + u.p0.y);
+        p = float4((r-0.5)*6.0, (r2-0.5)*4.0, (r3-0.5)*6.0, 1.5 + 2.0*r);
+        v = float4(0.0);
+    }
+    pt[id].pos = p; pt[id].vel = v;
+}
+)msl";
+
+static const char *kVS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSIn  { float4 pos [[attribute(0)]]; float4 vel [[attribute(1)]]; };
+struct VSOut { float4 position [[position]]; float point_size [[point_size]]; float4 color; };
+struct VUBO  { float4x4 mvp; };
+vertex VSOut vs(VSIn in [[stage_in]], constant VUBO &amp;u [[buffer(0)]]) {
+    VSOut o;
+    o.position   = u.mvp * float4(in.pos.xyz, 1.0);
+    o.point_size = 3.0;
+    float life = clamp(in.pos.w, 0.0, 1.0);
+    float spd  = length(in.vel.xyz);
+    float3 cold = float3(0.10, 0.30, 0.90), hot = float3(1.0, 0.6, 0.2);
+    o.color = float4(mix(cold, hot, clamp(spd*0.4, 0.0, 1.0)) * (0.25 + 0.75*life), 1.0);
+    return o;
+}
+)msl";
+static const char *kFS = R"msl(
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+struct VSOut { float4 position [[position]]; float point_size [[point_size]]; float4 color; };
+fragment float4 fs(VSOut in [[stage_in]]) { return in.color; }
+)msl";
+
+struct VUBO   { Mat4 mvp; };
+struct Params { float p0[4]; float attractor[4]; };
+
+struct AppState {
+    SDL_Window *window=nullptr; SDL_GPUDevice *device=nullptr;
+    SDL_GPUComputePipeline *compute=nullptr;
+    SDL_GPUGraphicsPipeline *draw=nullptr;
+    SDL_GPUBuffer *particles=nullptr;
+    float mouseX=0, mouseY=0; bool attracting=false;
+    int win_w=900, win_h=600;
+    Uint64 start_ns=0, last_ns=0;
+};
+
+static SDL_AppResult fail(const char *w){ SDL_Log("%s: %s", w, SDL_GetError()); return SDL_APP_FAILURE; }
+static SDL_GPUShader *make_shader(SDL_GPUDevice *d, const char *src, SDL_GPUShaderStage s, const char *e, Uint32 ubo){
+    SDL_GPUShaderCreateInfo i{}; i.code=(const Uint8*)src; i.code_size=std::strlen(src);
+    i.entrypoint=e; i.format=SDL_GPU_SHADERFORMAT_MSL; i.stage=s; i.num_uniform_buffers=ubo;
+    return SDL_CreateGPUShader(d,&amp;i);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("GPU Particles", "1.0", "com.example.sdl3.gpuparticles");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, true, nullptr);
+    st-&gt;window = SDL_CreateWindow("GPU Particles", st-&gt;win_w, st-&gt;win_h, SDL_WINDOW_RESIZABLE);
+    SDL_ClaimWindowForGPUDevice(st-&gt;device, st-&gt;window);
+
+    // Particle buffer: drawn as vertices AND simulated as compute storage.
+    SDL_GPUBufferCreateInfo bi{};
+    bi.usage = SDL_GPU_BUFFERUSAGE_VERTEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
+    bi.size  = sizeof(Particle) * N;
+    st-&gt;particles = SDL_CreateGPUBuffer(st-&gt;device, &amp;bi);
+
+    std::vector&lt;Particle&gt; init(N);
+    for (int i = 0; i &lt; N; ++i)
+        init[i] = { { (SDL_randf()-0.5f)*6, (SDL_randf()-0.5f)*4, (SDL_randf()-0.5f)*6, SDL_randf()*2.0f },
+                    { 0, 0, 0, 0 } };
+    {   // upload the seed state
+        SDL_GPUTransferBufferCreateInfo tbi{}; tbi.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD; tbi.size=(Uint32)bi.size;
+        SDL_GPUTransferBuffer *tb=SDL_CreateGPUTransferBuffer(st-&gt;device,&amp;tbi);
+        void *m=SDL_MapGPUTransferBuffer(st-&gt;device,tb,false); std::memcpy(m,init.data(),bi.size); SDL_UnmapGPUTransferBuffer(st-&gt;device,tb);
+        SDL_GPUCommandBuffer *cmd=SDL_AcquireGPUCommandBuffer(st-&gt;device); SDL_GPUCopyPass *cp=SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTransferBufferLocation s{}; s.transfer_buffer=tb; SDL_GPUBufferRegion r{}; r.buffer=st-&gt;particles; r.size=(Uint32)bi.size;
+        SDL_UploadToGPUBuffer(cp,&amp;s,&amp;r,false); SDL_EndGPUCopyPass(cp); SDL_SubmitGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(st-&gt;device,tb);
+    }
+
+    SDL_GPUComputePipelineCreateInfo ci{};
+    ci.code=(const Uint8*)kCompute; ci.code_size=std::strlen(kCompute);
+    ci.entrypoint="cs"; ci.format=SDL_GPU_SHADERFORMAT_MSL;
+    ci.num_uniform_buffers=1; ci.num_readwrite_storage_buffers=1;
+    ci.threadcount_x=64; ci.threadcount_y=1; ci.threadcount_z=1;
+    st-&gt;compute = SDL_CreateGPUComputePipeline(st-&gt;device, &amp;ci);
+    if (!st-&gt;compute) return fail("compute pipeline");
+
+    SDL_GPUShader *vs=make_shader(st-&gt;device,kVS,SDL_GPU_SHADERSTAGE_VERTEX,"vs",1);
+    SDL_GPUShader *fs=make_shader(st-&gt;device,kFS,SDL_GPU_SHADERSTAGE_FRAGMENT,"fs",0);
+    SDL_GPUVertexBufferDescription vb{}; vb.slot=0; vb.pitch=sizeof(Particle); vb.input_rate=SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    SDL_GPUVertexAttribute a[2]{};
+    a[0].location=0; a[0].buffer_slot=0; a[0].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4; a[0].offset=offsetof(Particle,pos);
+    a[1].location=1; a[1].buffer_slot=0; a[1].format=SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4; a[1].offset=offsetof(Particle,vel);
+    SDL_GPUVertexInputState vi{}; vi.vertex_buffer_descriptions=&amp;vb; vi.num_vertex_buffers=1; vi.vertex_attributes=a; vi.num_vertex_attributes=2;
+
+    SDL_GPUColorTargetBlendState bs{};
+    bs.enable_blend = true;
+    bs.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;      // additive
+    bs.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    bs.color_blend_op        = SDL_GPU_BLENDOP_ADD;
+    bs.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    bs.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    bs.alpha_blend_op        = SDL_GPU_BLENDOP_ADD;
+    SDL_GPUColorTargetDescription ct{}; ct.format=SDL_GetGPUSwapchainTextureFormat(st-&gt;device, st-&gt;window); ct.blend_state=bs;
+
+    SDL_GPUGraphicsPipelineCreateInfo pc{};
+    pc.vertex_shader=vs; pc.fragment_shader=fs; pc.primitive_type=SDL_GPU_PRIMITIVETYPE_POINTLIST; pc.vertex_input_state=vi;
+    pc.target_info.color_target_descriptions=&amp;ct; pc.target_info.num_color_targets=1;
+    st-&gt;draw=SDL_CreateGPUGraphicsPipeline(st-&gt;device,&amp;pc);
+    SDL_ReleaseGPUShader(st-&gt;device,vs); SDL_ReleaseGPUShader(st-&gt;device,fs);
+    if(!st-&gt;draw) return fail("draw pipeline");
+
+    st-&gt;start_ns = st-&gt;last_ns = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_MOUSE_MOTION) { st-&gt;mouseX = e-&gt;motion.x; st-&gt;mouseY = e-&gt;motion.y; }
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_DOWN &amp;&amp; e-&gt;button.button == SDL_BUTTON_LEFT) st-&gt;attracting = true;
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_UP   &amp;&amp; e-&gt;button.button == SDL_BUTTON_LEFT) st-&gt;attracting = false;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f; if (dt &gt; 0.05f) dt = 0.05f;
+    st-&gt;last_ns = now;
+    float time = (now - st-&gt;start_ns) / 1.0e9f;
+
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(st-&gt;device);
+
+    // Map the mouse to a point on the z = 0 plane, roughly framing the swarm
+    // (win_w/win_h hold the size from the previous frame, refreshed after acquire).
+    float ax = ((float)st-&gt;mouseX / st-&gt;win_w * 2.0f - 1.0f) * 6.0f;
+    float ay = -((float)st-&gt;mouseY / st-&gt;win_h * 2.0f - 1.0f) * 4.0f;
+    Params params{};
+    params.p0[0]=dt; params.p0[1]=time; params.p0[2]=(float)N; params.p0[3]=st-&gt;attracting ? 3.0f : 0.0f;
+    params.attractor[0]=ax; params.attractor[1]=ay; params.attractor[2]=0; params.attractor[3]=0;
+
+    // ---- compute pass: advance the simulation ----
+    SDL_GPUStorageBufferReadWriteBinding rw{}; rw.buffer = st-&gt;particles;
+    SDL_GPUComputePass *cp = SDL_BeginGPUComputePass(cmd, nullptr, 0, &amp;rw, 1);
+    SDL_BindGPUComputePipeline(cp, st-&gt;compute);
+    SDL_PushGPUComputeUniformData(cmd, 0, &amp;params, sizeof(params));
+    SDL_DispatchGPUCompute(cp, (N + 63) / 64, 1, 1);
+    SDL_EndGPUComputePass(cp);
+
+    // ---- render pass: draw the same buffer additively under the camera ----
+    SDL_GPUTexture *swap=nullptr; Uint32 sw=0, sh=0;
+    SDL_WaitAndAcquireGPUSwapchainTexture(cmd, st-&gt;window, &amp;swap, &amp;sw, &amp;sh);
+    if (swap) {
+        st-&gt;win_w = (int)sw; st-&gt;win_h = (int)sh;
+        float aspect = sh &gt; 0 ? (float)sw/(float)sh : 1.0f;
+        float ang = time * 0.2f, dist = 11.0f;
+        Mat4 view = mat4_look_at(SDL_sinf(ang)*dist, 1.0f, SDL_cosf(ang)*dist, 0,0,0, 0,1,0);
+        VUBO vub{}; vub.mvp = mat4_mul(mat4_perspective(60.0f*SDL_PI_F/180.0f, aspect, 0.1f, 100.0f), view);
+
+        SDL_GPUColorTargetInfo c{}; c.texture=swap; c.clear_color=SDL_FColor{0.01f,0.01f,0.03f,1};
+        c.load_op=SDL_GPU_LOADOP_CLEAR; c.store_op=SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *p = SDL_BeginGPURenderPass(cmd, &amp;c, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(p, st-&gt;draw);
+        SDL_GPUBufferBinding vb{}; vb.buffer=st-&gt;particles; SDL_BindGPUVertexBuffers(p,0,&amp;vb,1);
+        SDL_PushGPUVertexUniformData(cmd, 0, &amp;vub, sizeof(vub));
+        SDL_DrawGPUPrimitives(p, N, 1, 0, 0);
+        SDL_EndGPURenderPass(p);
+    }
+
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    if (st-&gt;device) {
+        if (st-&gt;particles) SDL_ReleaseGPUBuffer(st-&gt;device, st-&gt;particles);
+        if (st-&gt;draw)      SDL_ReleaseGPUGraphicsPipeline(st-&gt;device, st-&gt;draw);
+        if (st-&gt;compute)   SDL_ReleaseGPUComputePipeline(st-&gt;device, st-&gt;compute);
+        if (st-&gt;window) SDL_ReleaseWindowFromGPUDevice(st-&gt;device, st-&gt;window);
+        SDL_DestroyGPUDevice(st-&gt;device);
+    }
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Bump <code>N</code> to 500,000 — only the dispatch count changes, and the GPU shrugs.</li>
+        <li>Add a repulsor on the right mouse button (negate the attract strength) to blow particles apart.</li>
+        <li>Soft round sprites: expand each point into a camera-facing quad (recipe 18 instancing) and fade by radius for blobs instead of squares.</li>
+        <li>Swap the sine field for true curl noise so the flow is divergence-free and never bunches up.</li>
+    </ol>
+    <p>
+        And that completes the 3D track. From a single triangle you built a lit,
+        textured, shadowed world, authored cross-platform shaders, and finished with
+        many-light forward and deferred shading, tone mapping, reflections,
+        screen-space ambient occlusion, and a GPU particle system — the toolkit of a
+        modern real-time engine. The <a href="../bgfx/index.html">bgfx Track</a>
+        rebuilds this same arc on a graphics-API-agnostic renderer: SDL3 still owns
+        the window and input, while bgfx drives the backend — right down to its own
+        <a href="../bgfx/22-compute-particles.html">compute particle system</a>.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="26-ssao.html">← 26. Screen-Space Ambient Occlusion</a>
+    <a href="index.html">Index</a>
+    <a href="../bgfx/index.html">bgfx Track →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">3D Track</a> · Recipe 27
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

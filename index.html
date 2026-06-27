@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SDL3 Recipes — 2D, 3D & bgfx Game Tutorials in C++</title>
-    <meta name="description" content="A progressive, callback-style C++ curriculum for SDL3: 24 recipes for 2D games (SDL_Renderer), 25 for 3D graphics (SDL_GPU) with cross-platform shaders via SDL_shadercross, and 24 for the bgfx renderer (Metal/Vulkan/D3D behind one API). Beginner to advanced.">
+    <meta name="description" content="A progressive, callback-style C++ curriculum for SDL3: 24 recipes for 2D games (SDL_Renderer), 27 for 3D graphics (SDL_GPU) with cross-platform shaders via SDL_shadercross, and 24 for the bgfx renderer (Metal/Vulkan/D3D behind one API). Beginner to advanced.">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,10 +19,11 @@
     <h1>SDL3 Recipes</h1>
     <p class="lede">
         A progressive, callback-style C++ curriculum for SDL3 — twenty-four recipes
-        for 2D games, twenty-five for 3D graphics (cross-platform shaders, skyboxes,
-        shadows, GPU compute, many lights and a deferred renderer), and twenty-four
-        for driving the <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
-        renderer, ordered beginner to advanced. Every snippet uses the same
+        for 2D games, twenty-seven for 3D graphics (cross-platform shaders, skyboxes,
+        shadows, GPU compute, many lights, a deferred renderer, SSAO and GPU
+        particles), and twenty-four for driving the
+        <a href="https://github.com/bkaradzic/bgfx">bgfx</a> renderer, ordered
+        beginner to advanced. Every snippet uses the same
         <code>SDL_AppInit</code> / <code>SDL_AppEvent</code> /
         <code>SDL_AppIterate</code> / <code>SDL_AppQuit</code> skeleton, so you
         learn one loop model and reuse it everywhere.
@@ -45,7 +46,7 @@
         </a>
 
         <a class="card" href="3d/index.html">
-            <div class="meta">25 recipes · SDL_GPU + SDL_shadercross</div>
+            <div class="meta">27 recipes · SDL_GPU + SDL_shadercross</div>
             <h2>3D Track</h2>
             <p>
                 Drop one tier below SDL_Renderer to SDL_GPU — Metal / Vulkan /
@@ -140,7 +141,8 @@
         Cubemaps · Normal Mapping · Shadow Mapping · Compute Shaders · Instanced
         Rendering · Post-Processing &amp; Bloom · Alpha Blending &amp; Transparency
         · Mipmaps &amp; MSAA · Point &amp; Spot Lights · Tone Mapping &amp; Gamma ·
-        Environment Reflections · Deferred Shading.
+        Environment Reflections · Deferred Shading · Screen-Space Ambient
+        Occlusion · GPU Particles.
     </p>
     <h3>bgfx — <code>bgfx</code> + <code>shaderc</code></h3>
     <p>

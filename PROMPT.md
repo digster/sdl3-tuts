@@ -61,3 +61,21 @@ hero ledes, "at a glance" lists, the 3D "How to run" ranges → 14–25). Verifi
 structurally: 24/25/24 files, 852 internal links 0 broken, 0 unescaped
 `<`/`>`/`&amp;` in code blocks, Prism `prism → c → cpp` order, threaded footer
 chains, plus a browser render spot-check.
+
+---
+
+## 2026-06-26 (follow-up)
+
+> Okay, create a plan for your suggestion. [then] go ahead
+
+Added the two 3D-track recipes flagged at the end of the previous batch:
+**26 — Screen-Space Ambient Occlusion** (a fourth pass on the recipe-25 deferred
+G-buffer, stored in view space: hemisphere kernel + tiled noise → blur → lit
+composite) and **27 — GPU Particles** (the 3D analog of `bgfx/22` — recipe-17 compute
+machinery lifted into world space under an MVP camera, with a flow field, a mouse
+attractor and additive billboards; recipe 27 ends the track and bridges to the bgfx
+particle recipe). Re-wired `3d/25`'s footer + finale, bumped the 3D count to 27
+everywhere (track index hero/meta + the `14–27` "How to run" ranges, the root card,
+hero lede and "at a glance" list), and logged it. Counts now **24 / 27 / 24**;
+verified structurally (878 links 0 broken, escaping, Prism order, threaded chain) plus
+a browser spot-check.
