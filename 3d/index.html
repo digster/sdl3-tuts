@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>3D Track — SDL3 Recipes</title>
-    <meta name="description" content="Twenty-seven C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute, instancing, bloom, transparency, anti-aliasing, many lights, tone mapping, reflections, deferred shading, SSAO and GPU particles.">
+    <meta name="description" content="Thirty-one C++ callback-style SDL3 recipes for 3D graphics, using SDL_GPU. From the hello triangle through lighting, cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute, instancing, bloom, transparency, anti-aliasing, many lights, tone mapping, reflections, deferred shading, SSAO, GPU particles, procedural terrain, frustum culling, cascaded shadows and reflective water.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,14 +19,16 @@
 <header class="hero">
     <h1>3D Track</h1>
     <p class="lede">
-        Twenty-seven recipes that take you from the "hello triangle" to a textured,
+        Thirty-one recipes that take you from the "hello triangle" to a textured,
         lit cube you can fly around with an FPS camera, then on through
         cross-platform shaders, skyboxes, normal and shadow mapping, GPU compute,
         instanced rendering, post-processing bloom, transparency and anti-aliasing,
-        and finally lighting at scale: many point and spot lights, HDR tone
-        mapping, environment reflections, a deferred renderer, screen-space ambient
-        occlusion and a GPU particle system. All in C++ using SDL3's
-        <code>SDL_GPU</code> API (Metal / Vulkan / D3D12 under one abstraction).
+        lighting at scale — many point and spot lights, HDR tone mapping,
+        environment reflections, a deferred renderer, screen-space ambient occlusion
+        and a GPU particle system — and finally a full outdoor pipeline: procedural
+        terrain and fog, frustum culling, cascaded shadow maps and reflective water.
+        All in C++ using SDL3's <code>SDL_GPU</code> API (Metal / Vulkan / D3D12
+        under one abstraction).
     </p>
 </header>
 
@@ -169,20 +171,40 @@
             <div class="blurb">A 3D compute particle system — flow field, mouse attractor and additive billboards, simulated and drawn on the GPU.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
 
+        <li><span class="num">28</span>
+            <span class="title"><a href="28-terrain-and-fog.html">Procedural Terrain &amp; Fog</a>
+            <div class="blurb">An fBm heightmap triangulated into a grid mesh with central-difference normals, altitude colour and exponential distance fog.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">29</span>
+            <span class="title"><a href="29-frustum-culling.html">Frustum Culling</a>
+            <div class="blurb">Gribb–Hartmann planes from the view-projection, AABB tests, and a per-frame visible-instance list drawn in one instanced call.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">30</span>
+            <span class="title"><a href="30-cascaded-shadow-maps.html">Cascaded Shadow Maps</a>
+            <div class="blurb">Three shadow cascades fitted to view-frustum slices — crisp shadows up close, coverage to the horizon, picked per fragment.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">31</span>
+            <span class="title"><a href="31-water-planar-reflections.html">Water &amp; Planar Reflections</a>
+            <div class="blurb">A mirror camera rendered to an offscreen target, projected onto a rippling water plane with a Fresnel blend.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
     </ul>
 </section>
 
 <section>
     <h2>How to run the code</h2>
     <p>
-        For recipes 01–12 and 14–27, every <em>Complete listing</em> is a drop-in
+        For recipes 01–12 and 14–31, every <em>Complete listing</em> is a drop-in
         replacement for
         <a href="../../examples/cpp-gpu/triangle.cpp">examples/cpp-gpu/triangle.cpp</a>.
         Replace that file's contents, then build with <code>make run-gpu</code>
         from the repo root. That covers the original recipes through GPU compute
         as well as the later instancing, bloom, transparency, anti-aliasing, and
-        the lighting, tone-mapping, reflection, deferred, SSAO and particle
-        listings (18–27).
+        the lighting, tone-mapping, reflection, deferred, SSAO, particle, terrain,
+        culling, cascaded-shadow and water listings (18–31).
     </p>
     <p>
         Recipe 13 lives in the sibling folder
@@ -191,7 +213,7 @@
         with <code>make run-shadercross</code>.
     </p>
     <p>
-        Shaders in recipes 01–12 and 14–27 are written in <strong>Metal Shading
+        Shaders in recipes 01–12 and 14–31 are written in <strong>Metal Shading
         Language (MSL)</strong> and embedded as raw string literals. On macOS that
         compiles at runtime and needs no extra tooling. On other platforms see
         <a href="02-cross-platform-shaders.html">recipe 02</a> for the

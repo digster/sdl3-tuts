@@ -1,9 +1,9 @@
 # SDL3 Recipes
 
 A progressive, callback-style **C++ curriculum for SDL3** — delivered as a small,
-zero-build static website. **61 recipes** across three tracks take you from opening
-a window to GPU compute, shadow mapping and instanced rendering, all using the same
-loop model so you learn it once and reuse it everywhere.
+zero-build static website. **87 recipes** across three tracks take you from opening
+a window to a deferred renderer, cascaded shadows, reflective water and GPU-driven
+rendering, all using the same loop model so you learn it once and reuse it everywhere.
 
 The front page is [`index.html`](index.html); open it in a browser to start.
 
@@ -25,9 +25,9 @@ ordered beginner → advanced within each track.
 
 | Track | Rendering API | Recipes | From → to |
 |-------|---------------|:-------:|-----------|
-| [2D](2d/index.html)   | `SDL_Renderer`              | 20 | Hello Window → Pong → blend modes & 2D lighting |
-| [3D](3d/index.html)   | `SDL_GPU` + `SDL_shadercross` | 21 | Hello Triangle → lit cube + FPS camera → shadows, compute, bloom |
-| [bgfx](bgfx/index.html) | `bgfx` + `shaderc`        | 20 | Hello bgfx → spinning cube → mesh loading, picking, shadow mapping |
+| [2D](2d/index.html)   | `SDL_Renderer`              | 28 | Hello Window → Pong → scene stack → pathfinding, Asteroids |
+| [3D](3d/index.html)   | `SDL_GPU` + `SDL_shadercross` | 31 | Hello Triangle → lit cube + FPS camera → deferred, SSAO → terrain, cascaded shadows, water |
+| [bgfx](bgfx/index.html) | `bgfx` + `shaderc`        | 28 | Hello bgfx → spinning cube → PBR, deferred → HDR, occlusion queries, GPU-driven |
 
 - **2D** uses SDL3's high-level renderer — the gentlest on-ramp.
 - **3D** drops one tier to `SDL_GPU` (Metal / Vulkan / D3D12 behind one API), with
@@ -106,9 +106,9 @@ main loop.
 .
 ├── index.html        # Landing page — pick a track
 ├── style.css         # Shared stylesheet for every page
-├── 2d/               # 2D track: index.html + 01..20-*.html
-├── 3d/               # 3D track: index.html + 01..21-*.html
-├── bgfx/             # bgfx track: index.html + 01..20-*.html
+├── 2d/               # 2D track: index.html + 01..28-*.html
+├── 3d/               # 3D track: index.html + 01..31-*.html
+├── bgfx/             # bgfx track: index.html + 01..28-*.html
 ├── memory/           # Dated work-session notes (YYYY-MM-DD.md)
 ├── PROMPT.md         # Running log of prompts used to build the site
 ├── ARCHITECTURE.md   # Big-picture structure & contributor conventions

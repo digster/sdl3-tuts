@@ -79,3 +79,45 @@ everywhere (track index hero/meta + the `14–27` "How to run" ranges, the root 
 hero lede and "at a glance" list), and logged it. Counts now **24 / 27 / 24**;
 verified structurally (878 links 0 broken, escaping, Prism order, threaded chain) plus
 a browser spot-check.
+
+---
+
+## 2026-07-10
+
+> add more tuts across the tracks.
+
+Added 12 more recipes — four per track, append-only — the fourth such batch. **2D
+(25–28):** Streaming Textures &amp; Pixel Effects · A* Pathfinding · Spatial Hashing ·
+Mini Game: Asteroids (a second capstone). **3D (28–31):** a coherent outdoor arc —
+Procedural Terrain &amp; Fog · Frustum Culling · Cascaded Shadow Maps · Water &amp;
+Planar Reflections. **bgfx (25–28):** HDR &amp; Tone Mapping (twin of 3D/23) · SSAO
+(twin of 3D/26, on recipe-24's G-buffer) · Occlusion Queries · GPU-Driven Indirect
+Rendering. Re-wired the old terminators (`2d/24`, `3d/27`, `bgfx/24`) — footer
+`Next →` re-pointed and finales softened to forward transitions; the new last recipe
+of each track (`2d/28`, `3d/31`, `bgfx/28`) took over the cross-track terminator.
+Bumped every count to **28 / 31 / 28** (track indexes, root cards, hero ledes, "at a
+glance" lists, the 3D "How to run" ranges → 14–31) and refreshed the stale README
+(61 → 87; 20/21/20 → 28/31/28) and ARCHITECTURE counts. Verified the bgfx-native
+occlusion-query and draw-indirect APIs against docs (context7) before writing those
+listings. Verified structurally (counts, links, escaping, Prism order, threaded
+chains) plus a browser spot-check.
+
+---
+
+## 2026-07-10 (follow-up)
+
+> Yes, work on the tuning caveats.
+
+Baked three of batch-4's "tune-this-yourself" caveats into robust defaults.
+**CSM (`3d/30`):** texel-snap the cascade ortho box (round the light-space origin to
+whole shadow-map texels, fold the remainder into the ortho x/y offset — MJP method, no
+inverse) so shadows stop crawling as the camera moves; walkthrough + try-it + warn box
+updated. **SSAO (`bgfx/26`):** a caps-driven `u_flipY` uniform
+(`getCaps()->originBottomLeft`) flips the projected sample UV to match `screenTri`'s
+G-buffer orientation, so AO no longer haloes on non-GL backends; note updated and a
+cross-reference added to the already-consistent MSL `3d/26`. **Water (`3d/31`):** the
+reflection pass now discards real-world `y < 0` geometry (`clipBelow` uniform +
+`discard_fragment()`, world-Y passed through the scene VS) so submerged cubes can't leak
+into the mirror; lowered the cubes so they bob through the surface and the clip does
+visible work. Verified structurally (28/31/28, links, escaping, Prism order, chains) plus
+a browser spot-check.

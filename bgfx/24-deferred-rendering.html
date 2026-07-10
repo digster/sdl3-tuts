@@ -410,23 +410,18 @@ void main() {
         <li>Reconstruct position from depth instead of storing it, dropping the third attachment to save bandwidth — the standard production optimisation.</li>
     </ol>
     <p>
-        And that completes the bgfx track — and the SDL3 Recipes curriculum. You
-        wired SDL3's native window into bgfx, drew your first triangle, then climbed
-        through buffers, transforms, textures, instancing, mesh loading, picking,
-        post-processing, compute, skyboxes, normal and shadow mapping, PBR,
-        particles, the stencil buffer and now a deferred renderer — the same arc you
-        walked in the <a href="../2d/index.html">2D</a> and
-        <a href="../3d/index.html">3D</a> tracks, here on a graphics-API-agnostic
-        renderer. Three renderers, one callback skeleton, learned once and reused
-        everywhere. From here, the natural next step is to build something of your
-        own — the toolkit is complete.
+        The G-buffer is the launch pad for the track's closing recipes. They add the
+        modern-renderer finish: HDR and tone mapping, screen-space ambient occlusion
+        layered on this very G-buffer, GPU occlusion queries, and a
+        <a href="28-gpu-driven-indirect.html">GPU-driven indirect</a> pipeline to end
+        the track — the frontier features that set bgfx apart.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="23-stencil-reflections.html">← Prev: Stencil Reflections &amp; Outlines</a>
     <a href="index.html">Index</a>
-    <a href="../index.html">All tracks →</a>
+    <a href="25-hdr-tone-mapping.html">Next: HDR &amp; Tone Mapping →</a>
 </nav>
 
 </main>

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>25 · Streaming Textures &amp; Pixel Effects — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>25. Streaming Textures &amp; Pixel Effects</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 25 — Streaming Textures &amp; Pixel Effects</h1>
+    <p class="tagline">
+        Write pixels by hand. A <em>streaming</em> texture hands you its raw memory
+        every frame, so you can compute colour per pixel on the CPU — a classic
+        rolling fire and a plasma field — and upload the whole buffer with one
+        <code>SDL_UnlockTexture</code>.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>The three texture access modes and why effects need <code>SDL_TEXTUREACCESS_STREAMING</code>.</li>
+        <li>Locking a texture for CPU writes with <code>SDL_LockTexture</code> / <code>SDL_UnlockTexture</code>.</li>
+        <li>Why you must honour the returned <strong>pitch</strong> (bytes per row), not assume <code>width × 4</code>.</li>
+        <li>Two per-pixel effects — a propagating fire and a trigonometric plasma — rendered at a small internal size and scaled up.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="05-loading-textures.html">Recipe 05 — Loading Textures</a> for
+        textures and destination rects, and <a href="16-render-targets.html">recipe
+        16</a> for the render-at-a-small-size-then-scale idea. Where recipe 16 let
+        the <em>GPU</em> fill a target texture, this recipe fills the pixels itself,
+        on the CPU.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>Three access modes</h3>
+    <p>
+        A texture is created with one of three access hints.
+        <code>STATIC</code> (recipe 05) is uploaded rarely with
+        <code>SDL_UpdateTexture</code>. <code>TARGET</code> (recipe 16) is drawn
+        into by the GPU. <code>STREAMING</code> is the one you rewrite from the CPU
+        <em>every frame</em> — SDL keeps it in memory you can map, so a per-pixel
+        effect costs one lock and one upload, not thousands of draw calls.
+    </p>
+<pre><code class="language-cpp">st-&gt;tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888,
+                           SDL_TEXTUREACCESS_STREAMING, FW, FH);   // small internal size
+SDL_SetTextureScaleMode(st-&gt;tex, SDL_SCALEMODE_NEAREST);           // crisp, chunky pixels
+</code></pre>
+
+    <h3>Lock, write, unlock</h3>
+    <p>
+        <code>SDL_LockTexture</code> gives you a raw pointer plus a
+        <strong>pitch</strong>: the number of <em>bytes</em> from the start of one
+        row to the start of the next. It is frequently larger than
+        <code>width × 4</code> because drivers pad rows for alignment, so you must
+        step by <code>pitch</code> and never assume a tight buffer.
+    </p>
+<pre><code class="language-cpp">void *pixels = nullptr; int pitch = 0;
+SDL_LockTexture(st-&gt;tex, nullptr, &amp;pixels, &amp;pitch);
+for (int y = 0; y &lt; FH; ++y) {
+    Uint32 *row = (Uint32 *)((Uint8 *)pixels + y * pitch);   // pitch is BYTES
+    for (int x = 0; x &lt; FW; ++x) row[x] = argb;              // one packed pixel
+}
+SDL_UnlockTexture(st-&gt;tex);                                   // uploads the whole buffer
+</code></pre>
+
+    <h3>The fire, one row at a time</h3>
+    <p>
+        The rolling-fire trick keeps a <code>heat</code> field the size of the
+        texture. The bottom row is reseeded hot each frame; every pixel above cools
+        as it copies heat upward from its neighbours. A palette maps heat →
+        black → red → orange → yellow → white.
+    </p>
+<pre><code class="language-cpp">for (int x = 0; x &lt; FW; ++x)                        // reseed the base
+    heat[(FH - 1) * FW + x] = on ? 200 + (Uint8)(SDL_rand(56)) : 0;
+
+for (int y = 0; y &lt; FH - 1; ++y)                    // propagate + cool upward
+    for (int x = 0; x &lt; FW; ++x) {
+        int below = (y + 1) * FW + ((x + (int)SDL_rand(3) - 1 + FW) % FW);
+        int decay = (int)SDL_rand(3);               // random cooling
+        int v = heat[below] - decay;
+        heat[y * FW + x] = (Uint8)(v &lt; 0 ? 0 : v);
+    }
+</code></pre>
+
+    <div class="note">
+        <strong>Small buffer, big window.</strong> Fire and plasma are computed at
+        a low internal resolution (a couple hundred pixels wide) and stretched to
+        fill the window by <code>SDL_RenderTexture</code>. That keeps the per-pixel
+        CPU work cheap while <code>SDL_SCALEMODE_NEAREST</code> gives the crunchy,
+        deliberately-pixelated look.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A streaming texture updated every frame. Press <kbd>Space</kbd> to switch
+        between the rolling fire and a plasma field; hold the mouse button to paint
+        extra heat into the fire.
+    </p>
+<pre><code class="language-cpp">/*
+ * 25-streaming-textures.cpp — a STREAMING texture written per-pixel on the CPU:
+ * a propagating fire and a plasma field, computed small and scaled to the window.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;vector&gt;
+#include "gfx.hpp"
+
+static const int WIN_W = 800, WIN_H = 600;
+static const int FW = 256, FH = 192;                 // internal effect resolution
+
+// heat -&gt; ARGB fire palette (black through white). 256 entries.
+static Uint32 fire_color(Uint8 h)
+{
+    // Piecewise ramp: red rises first, then green, then blue at the top.
+    Uint8 r = (Uint8)SDL_min(255, h * 3);
+    Uint8 g = (Uint8)SDL_min(255, h &gt; 85 ? (h - 85) * 3 : 0);
+    Uint8 b = (Uint8)SDL_min(255, h &gt; 170 ? (h - 170) * 3 : 0);
+    return (0xFFu &lt;&lt; 24) | (r &lt;&lt; 16) | (g &lt;&lt; 8) | b;      // ARGB8888
+}
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture  *tex = nullptr;
+    std::vector&lt;Uint8&gt; heat;          // FW*FH heat field for the fire
+    bool   plasma = false;           // Space toggles fire / plasma
+    bool   painting = false;         // mouse held: inject heat
+    float  mx = 0, my = 0;           // mouse in internal-texture space
+    Uint64 start_ns = 0;
+};
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Streaming Textures", "1.0", "com.example.sdl3.streaming");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Streaming Textures &amp; Pixel Effects", WIN_W, WIN_H, 0,
+                                     &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    st-&gt;tex = SDL_CreateTexture(st-&gt;renderer, SDL_PIXELFORMAT_ARGB8888,
+                                SDL_TEXTUREACCESS_STREAMING, FW, FH);
+    SDL_SetTextureScaleMode(st-&gt;tex, SDL_SCALEMODE_NEAREST);
+    st-&gt;heat.assign(FW * FH, 0);
+    st-&gt;start_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (e-&gt;key.scancode == SDL_SCANCODE_SPACE)  st-&gt;plasma = !st-&gt;plasma;
+    }
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_DOWN) st-&gt;painting = true;
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_UP)   st-&gt;painting = false;
+    if (e-&gt;type == SDL_EVENT_MOUSE_MOTION) {
+        st-&gt;mx = e-&gt;motion.x * (float)FW / WIN_W;    // window -&gt; internal texture space
+        st-&gt;my = e-&gt;motion.y * (float)FH / WIN_H;
+    }
+    return SDL_APP_CONTINUE;
+}
+
+// --- Fire: reseed base, propagate + cool upward. ---
+static void step_fire(AppState *st)
+{
+    Uint8 *h = st-&gt;heat.data();
+    for (int x = 0; x &lt; FW; ++x)
+        h[(FH - 1) * FW + x] = 180 + (Uint8)SDL_rand(76);   // hot base row
+
+    if (st-&gt;painting) {                                     // inject a hot blob at the cursor
+        int cx = (int)st-&gt;mx, cy = (int)st-&gt;my;
+        for (int y = -4; y &lt;= 4; ++y)
+            for (int x = -4; x &lt;= 4; ++x) {
+                int px = cx + x, py = cy + y;
+                if (px &gt;= 0 &amp;&amp; px &lt; FW &amp;&amp; py &gt;= 0 &amp;&amp; py &lt; FH) h[py * FW + px] = 255;
+            }
+    }
+    for (int y = 0; y &lt; FH - 1; ++y)                        // each cell cools its neighbour below
+        for (int x = 0; x &lt; FW; ++x) {
+            int src_x = (x + (int)SDL_rand(3) - 1 + FW) % FW;
+            int v = h[(y + 1) * FW + src_x] - (int)SDL_rand(3);
+            h[y * FW + x] = (Uint8)(v &lt; 0 ? 0 : v);
+        }
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (SDL_GetTicksNS() - st-&gt;start_ns) / 1.0e9f;
+
+    if (!st-&gt;plasma) step_fire(st);
+
+    // ---- Write the whole texture through the locked pointer ----
+    void *pixels = nullptr; int pitch = 0;
+    if (SDL_LockTexture(st-&gt;tex, nullptr, &amp;pixels, &amp;pitch)) {
+        for (int y = 0; y &lt; FH; ++y) {
+            Uint32 *row = (Uint32 *)((Uint8 *)pixels + y * pitch);   // step by BYTES
+            for (int x = 0; x &lt; FW; ++x) {
+                if (st-&gt;plasma) {
+                    // Sum of sines: a smooth, animated colour field.
+                    float v = SDL_sinf(x * 0.06f + t)
+                            + SDL_sinf(y * 0.08f - t * 1.3f)
+                            + SDL_sinf((x + y) * 0.05f + t * 0.7f);
+                    Uint8 r = (Uint8)(128 + 127 * SDL_sinf(v * 1.05f));
+                    Uint8 g = (Uint8)(128 + 127 * SDL_sinf(v * 1.05f + 2.094f));
+                    Uint8 b = (Uint8)(128 + 127 * SDL_sinf(v * 1.05f + 4.188f));
+                    row[x] = (0xFFu &lt;&lt; 24) | (r &lt;&lt; 16) | (g &lt;&lt; 8) | b;
+                } else {
+                    row[x] = fire_color(st-&gt;heat[y * FW + x]);
+                }
+            }
+        }
+        SDL_UnlockTexture(st-&gt;tex);              // pushes the buffer to the GPU
+    }
+
+    gfx::clear(st-&gt;renderer, 0, 0, 0);
+    SDL_RenderTexture(st-&gt;renderer, st-&gt;tex, nullptr, nullptr);   // stretch to the window
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        if (st-&gt;tex) SDL_DestroyTexture(st-&gt;tex);
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Only part of the texture changed? Pass a non-null rect to <code>SDL_LockTexture</code> to lock and upload just that sub-region.</li>
+        <li>Swap the fire palette for a green "toxic" or blue "cold" ramp by remapping the channels in <code>fire_color</code>.</li>
+        <li>Compare against <code>SDL_UpdateTexture</code>: fill a scratch array and upload it in one call. Which is clearer? (Locking avoids a second buffer and copy.)</li>
+        <li>Make the plasma react to the mouse: fold <code>mx</code>/<code>my</code> into the sine arguments so the field warps around the cursor.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="24-scene-state-stack.html">← 24. Scene/State Stack</a>
+    <a href="index.html">Index</a>
+    <a href="26-astar-pathfinding.html">Next: A* Pathfinding →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 25
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

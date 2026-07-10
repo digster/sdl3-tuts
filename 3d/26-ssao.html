@@ -111,7 +111,10 @@ occlusion += (sampleDepth &gt;= samplePos.z + u.bias ? 1.0 : 0.0) * range;
         right-handed view space (camera down <code>−Z</code>), matching this site's
         <code>mat4_perspective</code>. If AO appears inverted or haloed, flip the
         comparison or nudge <code>bias</code>/<code>radius</code> — the same
-        backend-sensitivity you met with shadow mapping. The final blur is a 4×4
+        backend-sensitivity you met with shadow mapping. (This SDL_GPU version is
+        MSL-only, so the projected-UV vertical is already consistent; the bgfx twin
+        <a href="../bgfx/26-ssao.html">bgfx recipe 26</a> adds a caps-driven flip to
+        cover backends with a bottom-left origin.) The final blur is a 4×4
         box that hides the 4×4 noise tiling exactly.
     </div>
 </section>

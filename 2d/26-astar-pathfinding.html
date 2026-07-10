@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>26 · A* Pathfinding — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>26. A* Pathfinding</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-intermediate">Intermediate</span>
+    <h1>Recipe 26 — A* Pathfinding</h1>
+    <p class="tagline">
+        Find the shortest route across a tile grid. A* expands the frontier in
+        best-first order using a binary-heap priority queue and a Manhattan
+        heuristic, then an agent walks the path you click for it — around every
+        wall in the way.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>The A* loop: <code>f = g + h</code>, the open set, the closed set, and how the heuristic steers it.</li>
+        <li>A compact <strong>binary heap</strong> as the open-set priority queue — no external containers.</li>
+        <li>Reconstructing the path by walking <code>came_from</code> back from the goal.</li>
+        <li>Turning grid waypoints into smooth agent movement, and re-planning on click.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="10-tilemap-rendering.html">Recipe 10 — Tilemap Rendering</a> for
+        the grid and tile-to-pixel mapping, and
+        <a href="04-delta-time.html">recipe 04</a> for frame-rate-independent
+        movement along the returned path.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>A* in one sentence</h3>
+    <p>
+        Dijkstra explores outward in every direction equally; A* biases the search
+        toward the goal by adding a <strong>heuristic</strong> estimate of the
+        remaining distance. Each cell gets <code>g</code> (known cost from the
+        start) and <code>h</code> (estimated cost to the goal); the open set is
+        always expanded lowest-<code>f = g + h</code> first. With an
+        <em>admissible</em> heuristic (never an over-estimate) the first time the
+        goal pops off the queue, its path is optimal.
+    </p>
+<pre><code class="language-cpp">static int heuristic(int ax, int ay, int bx, int by) {
+    return SDL_abs(ax - bx) + SDL_abs(ay - by);   // Manhattan: 4-connected grid
+}
+</code></pre>
+
+    <h3>A binary heap for the open set</h3>
+    <p>
+        The open set must repeatedly yield its minimum-<code>f</code> node, so it's
+        a min-heap keyed on <code>f</code>. A flat array with the standard
+        <em>sift-up</em> on push and <em>sift-down</em> on pop gives O(log n)
+        operations with no allocation churn.
+    </p>
+<pre><code class="language-cpp">struct HeapItem { int f, idx; };
+struct Heap { std::vector&lt;HeapItem&gt; a;
+    void push(HeapItem v) {
+        a.push_back(v);
+        int i = (int)a.size() - 1;
+        while (i &gt; 0 &amp;&amp; a[(i - 1) / 2].f &gt; a[i].f) { std::swap(a[i], a[(i - 1) / 2]); i = (i - 1) / 2; }
+    }
+    HeapItem pop() {
+        HeapItem top = a[0]; a[0] = a.back(); a.pop_back();
+        int i = 0, n = (int)a.size();
+        for (;;) {
+            int l = 2*i+1, r = 2*i+2, m = i;
+            if (l &lt; n &amp;&amp; a[l].f &lt; a[m].f) m = l;
+            if (r &lt; n &amp;&amp; a[r].f &lt; a[m].f) m = r;
+            if (m == i) break;
+            std::swap(a[i], a[m]); i = m;
+        }
+        return top;
+    }
+    bool empty() const { return a.empty(); }
+};
+</code></pre>
+
+    <h3>The search</h3>
+    <p>
+        Each cell stores its best-known <code>g</code> and the neighbour it came
+        from. Popping a node, we relax its four orthogonal neighbours: if we can
+        reach one more cheaply than before, record the new <code>g</code>, set
+        <code>came_from</code>, and push it with an updated <code>f</code>. A stale
+        duplicate may sit in the heap, but the closed check skips it when it pops.
+    </p>
+<pre><code class="language-cpp">while (!open.empty()) {
+    int cur = open.pop().idx;
+    if (cur == goal) break;                 // optimal path found
+    if (closed[cur]) continue;              // a stale heap entry
+    closed[cur] = true;
+    int cx = cur % COLS, cy = cur / COLS;
+    const int dx[4] = { 1,-1,0,0 }, dy[4] = { 0,0,1,-1 };
+    for (int d = 0; d &lt; 4; ++d) {
+        int nx = cx + dx[d], ny = cy + dy[d];
+        if (nx &lt; 0 || nx &gt;= COLS || ny &lt; 0 || ny &gt;= ROWS) continue;
+        int ni = ny * COLS + nx;
+        if (wall[ni] || closed[ni]) continue;
+        int ng = g[cur] + 1;                // uniform step cost
+        if (ng &lt; g[ni]) {
+            g[ni] = ng; came_from[ni] = cur;
+            open.push({ ng + heuristic(nx, ny, gx, gy), ni });
+        }
+    }
+}
+</code></pre>
+
+    <div class="note">
+        <strong>The heuristic must match the moves.</strong> On a 4-connected grid
+        Manhattan distance is admissible and fast. Allow diagonal moves and you'd
+        switch to the octile (Chebyshev-with-√2) distance — a Manhattan estimate
+        would over-count and could return a non-shortest path.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        A grid of walls with a green agent. <strong>Left-click</strong> a floor
+        tile to send it there — A* plans around the walls, the path is drawn in
+        amber, and the agent walks it. <strong>Right-click</strong> toggles a wall
+        and re-plans live.
+    </p>
+<pre><code class="language-cpp">/*
+ * 26-astar-pathfinding.cpp — A* over a tile grid with a binary-heap open set;
+ * click to set the goal, the agent walks the returned path.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;vector&gt;
+#include &lt;algorithm&gt;
+#include "gfx.hpp"
+
+static const int COLS = 24, ROWS = 16, TILE = 32;
+static const int WIN_W = COLS * TILE, WIN_H = ROWS * TILE;
+
+struct HeapItem { int f, idx; };
+struct Heap {
+    std::vector&lt;HeapItem&gt; a;
+    void push(HeapItem v) {
+        a.push_back(v);
+        int i = (int)a.size() - 1;
+        while (i &gt; 0 &amp;&amp; a[(i - 1) / 2].f &gt; a[i].f) { std::swap(a[i], a[(i - 1) / 2]); i = (i - 1) / 2; }
+    }
+    HeapItem pop() {
+        HeapItem top = a[0]; a[0] = a.back(); a.pop_back();
+        int i = 0, n = (int)a.size();
+        for (;;) {
+            int l = 2*i+1, r = 2*i+2, m = i;
+            if (l &lt; n &amp;&amp; a[l].f &lt; a[m].f) m = l;
+            if (r &lt; n &amp;&amp; a[r].f &lt; a[m].f) m = r;
+            if (m == i) break;
+            std::swap(a[i], a[m]); i = m;
+        }
+        return top;
+    }
+    bool empty() const { return a.empty(); }
+    void clear() { a.clear(); }
+};
+
+static int heuristic(int ax, int ay, int bx, int by) { return SDL_abs(ax - bx) + SDL_abs(ay - by); }
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    std::vector&lt;Uint8&gt; wall;                 // COLS*ROWS: 1 = blocked
+    std::vector&lt;int&gt;   path;                 // cell indices, start .. goal
+    int   start = 0;
+    float ax, ay;                           // agent pixel position
+    int   step = 0;                         // index into path the agent walks toward
+    Uint64 last_ns = 0;
+};
+
+// Run A*; fill st-&gt;path (empty if unreachable). start/goal are cell indices.
+static void plan(AppState *st, int start, int goal)
+{
+    const int N = COLS * ROWS;
+    std::vector&lt;int&gt;  g(N, 1 &lt;&lt; 30), came(N, -1);
+    std::vector&lt;Uint8&gt; closed(N, 0);
+    Heap open;
+    g[start] = 0;
+    int gx = goal % COLS, gy = goal / COLS;
+    open.push({ heuristic(start % COLS, start / COLS, gx, gy), start });
+
+    while (!open.empty()) {
+        int cur = open.pop().idx;
+        if (cur == goal) break;
+        if (closed[cur]) continue;
+        closed[cur] = 1;
+        int cx = cur % COLS, cy = cur / COLS;
+        const int dx[4] = { 1,-1,0,0 }, dy[4] = { 0,0,1,-1 };
+        for (int d = 0; d &lt; 4; ++d) {
+            int nx = cx + dx[d], ny = cy + dy[d];
+            if (nx &lt; 0 || nx &gt;= COLS || ny &lt; 0 || ny &gt;= ROWS) continue;
+            int ni = ny * COLS + nx;
+            if (st-&gt;wall[ni] || closed[ni]) continue;
+            int ng = g[cur] + 1;
+            if (ng &lt; g[ni]) { g[ni] = ng; came[ni] = cur; open.push({ ng + heuristic(nx, ny, gx, gy), ni }); }
+        }
+    }
+
+    st-&gt;path.clear();
+    if (came[goal] == -1 &amp;&amp; goal != start) return;     // unreachable
+    for (int c = goal; c != -1; c = came[c]) st-&gt;path.push_back(c);
+    std::reverse(st-&gt;path.begin(), st-&gt;path.end());
+    st-&gt;step = 1;                                       // 0 is the tile we're on
+}
+
+static void cell_center(int idx, float *px, float *py)
+{
+    *px = (idx % COLS) * TILE + TILE * 0.5f;
+    *py = (idx / COLS) * TILE + TILE * 0.5f;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("A* Pathfinding", "1.0", "com.example.sdl3.astar");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("A* Pathfinding", WIN_W, WIN_H, 0, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+
+    st-&gt;wall.assign(COLS * ROWS, 0);
+    for (int y = 2; y &lt; 12; ++y) st-&gt;wall[y * COLS + 8]  = 1;   // two barriers with gaps
+    for (int y = 4; y &lt; 14; ++y) st-&gt;wall[y * COLS + 15] = 1;
+    st-&gt;wall[6 * COLS + 8]  = 0;                                // a doorway in each
+    st-&gt;wall[9 * COLS + 15] = 0;
+
+    st-&gt;start = 1 * COLS + 1;
+    cell_center(st-&gt;start, &amp;st-&gt;ax, &amp;st-&gt;ay);
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+        int cx = (int)(e-&gt;button.x / TILE), cy = (int)(e-&gt;button.y / TILE);
+        if (cx &lt; 0 || cx &gt;= COLS || cy &lt; 0 || cy &gt;= ROWS) return SDL_APP_CONTINUE;
+        int idx = cy * COLS + cx;
+        if (e-&gt;button.button == SDL_BUTTON_RIGHT) {           // toggle a wall, re-plan
+            st-&gt;wall[idx] = !st-&gt;wall[idx];
+            if (!st-&gt;path.empty()) plan(st, st-&gt;start, st-&gt;path.back());
+        } else if (!st-&gt;wall[idx]) {                          // set a new goal
+            // Re-root the search at the tile the agent currently stands on.
+            st-&gt;start = ((int)(st-&gt;ay / TILE)) * COLS + (int)(st-&gt;ax / TILE);
+            plan(st, st-&gt;start, idx);
+        }
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    // Walk toward the next waypoint at a constant speed.
+    if (!st-&gt;path.empty() &amp;&amp; st-&gt;step &lt; (int)st-&gt;path.size()) {
+        float tx, ty; cell_center(st-&gt;path[st-&gt;step], &amp;tx, &amp;ty);
+        float dx = tx - st-&gt;ax, dy = ty - st-&gt;ay, dist = SDL_sqrtf(dx*dx + dy*dy);
+        float speed = 160.0f, move = speed * dt;
+        if (dist &lt;= move) { st-&gt;ax = tx; st-&gt;ay = ty; ++st-&gt;step; }   // reached, advance
+        else { st-&gt;ax += dx / dist * move; st-&gt;ay += dy / dist * move; }
+    }
+
+    gfx::clear(st-&gt;renderer, 18, 20, 28);
+    // Tiles: walls dark, floor faint, a thin grid.
+    for (int y = 0; y &lt; ROWS; ++y)
+        for (int x = 0; x &lt; COLS; ++x) {
+            if (st-&gt;wall[y * COLS + x]) gfx::set_color(st-&gt;renderer, 60, 66, 84, 255);
+            else                       gfx::set_color(st-&gt;renderer, 30, 34, 46, 255);
+            gfx::fill_rect(st-&gt;renderer, x*TILE+1, y*TILE+1, TILE-2, TILE-2);
+        }
+    // Path as amber pips.
+    gfx::set_color(st-&gt;renderer, 240, 190, 90, 255);
+    for (int i = st-&gt;step; i &lt; (int)st-&gt;path.size(); ++i) {
+        float px, py; cell_center(st-&gt;path[i], &amp;px, &amp;py);
+        gfx::fill_rect(st-&gt;renderer, px - 4, py - 4, 8, 8);
+    }
+    // Goal marker + agent.
+    if (!st-&gt;path.empty()) {
+        float gx, gy; cell_center(st-&gt;path.back(), &amp;gx, &amp;gy);
+        gfx::set_color(st-&gt;renderer, 230, 110, 110, 255);
+        gfx::rect(st-&gt;renderer, gx - 10, gy - 10, 20, 20);
+    }
+    gfx::set_color(st-&gt;renderer, 120, 230, 150, 255);
+    gfx::fill_circle(st-&gt;renderer, st-&gt;ax, st-&gt;ay, 10);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Weighted terrain: give tiles a movement cost (mud = 3, road = 1) and add it instead of the flat <code>+1</code>. A* now prefers cheap ground.</li>
+        <li>Allow diagonal moves (8 neighbours) and switch the heuristic to octile distance — watch paths cut corners.</li>
+        <li>Draw the search itself: shade every <code>closed</code> cell to see how the heuristic focuses the frontier toward the goal versus a plain Dijkstra flood.</li>
+        <li>Smooth the route: run a line-of-sight test between waypoints and drop any that a straight line already clears (string-pulling).</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="25-streaming-textures.html">← 25. Streaming Textures &amp; Pixel Effects</a>
+    <a href="index.html">Index</a>
+    <a href="27-spatial-hashing.html">Next: Spatial Hashing →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 26
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

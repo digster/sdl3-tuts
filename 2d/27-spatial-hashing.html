@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>27 · Spatial Hashing — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>27. Spatial Hashing</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 27 — Spatial Hashing</h1>
+    <p class="tagline">
+        Collision that scales. Checking every pair of N objects is O(n²) and melts
+        at a few hundred entities; a uniform-grid <em>broad phase</em> only compares
+        objects in the same or neighbouring cells. Toggle the two and watch the
+        millisecond counter.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Why brute-force pair testing is O(n²) and where it falls over.</li>
+        <li>A <strong>uniform spatial hash</strong>: bucket objects by <code>(x/cell, y/cell)</code> each frame.</li>
+        <li>Testing only same-cell and neighbouring-cell pairs — the broad phase / narrow phase split.</li>
+        <li>Measuring the difference with <code>SDL_GetPerformanceCounter</code> and a live overlay.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="07-collision-detection.html">Recipe 07 — Collision Detection</a>
+        for the circle-circle test this accelerates, and
+        <a href="11-particle-systems.html">recipe 11</a> for updating a pool of
+        moving objects each frame.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The O(n²) wall</h3>
+    <p>
+        The naive collision loop compares object <code>i</code> against every
+        <code>j &gt; i</code>. That's <code>n(n−1)/2</code> tests: fine for 50
+        objects (~1 200 tests), brutal for 800 (~320 000). Most of those tests are
+        wasted on pairs nowhere near each other. A <strong>broad phase</strong>
+        cheaply rejects distant pairs so the exact <em>narrow-phase</em> test only
+        runs on plausible ones.
+    </p>
+
+    <h3>Bucket by cell</h3>
+    <p>
+        Pick a cell size roughly the diameter of an object. Each frame, clear the
+        grid and drop every object into the bucket for its cell. Hash the cell
+        coordinate to an index; a <code>vector&lt;vector&lt;int&gt;&gt;</code> of object
+        indices is the simplest store.
+    </p>
+<pre><code class="language-cpp">static const int CELL = 32;
+static const int GW = (WIN_W + CELL - 1) / CELL, GH = (WIN_H + CELL - 1) / CELL;
+
+std::vector&lt;std::vector&lt;int&gt;&gt; grid(GW * GH);
+for (auto &amp;b : grid) b.clear();
+for (int i = 0; i &lt; N; ++i) {
+    int cx = SDL_clamp((int)(obj[i].x / CELL), 0, GW - 1);
+    int cy = SDL_clamp((int)(obj[i].y / CELL), 0, GH - 1);
+    grid[cy * GW + cx].push_back(i);
+}
+</code></pre>
+
+    <h3>Only nearby cells</h3>
+    <p>
+        Two objects can only touch if they share a cell or sit in adjacent ones. So
+        for each cell, test its members against each other <em>and</em> against the
+        members of its neighbours. Visiting only the "forward" half of the 3×3
+        neighbourhood (this cell plus four of the eight around it) tests each pair
+        exactly once.
+    </p>
+<pre><code class="language-cpp">// Offsets that cover every unordered pair once: self + E, SW, S, SE.
+static const int OX[5] = { 0, 1, -1, 0, 1 };
+static const int OY[5] = { 0, 0,  1, 1, 1 };
+
+for (int cy = 0; cy &lt; GH; ++cy)
+  for (int cx = 0; cx &lt; GW; ++cx) {
+    const auto &amp;here = grid[cy * GW + cx];
+    for (int o = 0; o &lt; 5; ++o) {
+        int nx = cx + OX[o], ny = cy + OY[o];
+        if (nx &lt; 0 || nx &gt;= GW || ny &lt; 0 || ny &gt;= GH) continue;
+        const auto &amp;other = grid[ny * GW + nx];
+        for (size_t a = 0; a &lt; here.size(); ++a)
+            for (size_t b = (o == 0 ? a + 1 : 0); b &lt; other.size(); ++b)
+                resolve(obj[here[a]], obj[other[b]]);   // narrow phase
+    }
+  }
+</code></pre>
+
+    <div class="note">
+        <strong>Cell size is the tuning knob.</strong> Too large and each bucket
+        holds many objects (back toward O(n²) locally); too small and a single
+        object spans several cells and you re-test it. About one object-diameter is
+        the sweet spot for uniformly-sized entities. For wildly different sizes,
+        reach for a loose grid or a quadtree instead.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Several hundred bouncing balls resolving elastic collisions. Press
+        <kbd>Space</kbd> to switch between the grid broad phase and brute force, and
+        <kbd>↑</kbd>/<kbd>↓</kbd> to add or remove balls. The corner shows the
+        collision-pass time in milliseconds — grid stays flat as brute force climbs.
+    </p>
+<pre><code class="language-cpp">/*
+ * 27-spatial-hashing.cpp — uniform-grid broad phase vs. brute force for
+ * circle-circle collision across hundreds of moving balls, timed live.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;vector&gt;
+#include "gfx.hpp"
+
+static const int WIN_W = 900, WIN_H = 640;
+static const int CELL = 28;
+static const int GW = (WIN_W + CELL - 1) / CELL, GH = (WIN_H + CELL - 1) / CELL;
+static const float RADIUS = 7.0f;
+
+struct Ball { float x, y, vx, vy; };
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    std::vector&lt;Ball&gt; balls;
+    std::vector&lt;std::vector&lt;int&gt;&gt; grid;    // GW*GH buckets of ball indices
+    bool   use_grid = true;
+    double ms = 0.0;                        // last collision-pass time
+    Uint64 last_ns = 0;
+};
+
+static void spawn(AppState *st, int n)
+{
+    for (int i = 0; i &lt; n; ++i) {
+        float a = SDL_randf() * 6.2831853f, sp = 60 + SDL_randf() * 90;
+        st-&gt;balls.push_back({ 40 + SDL_randf() * (WIN_W - 80),
+                              40 + SDL_randf() * (WIN_H - 80),
+                              SDL_cosf(a) * sp, SDL_sinf(a) * sp });
+    }
+}
+
+// Narrow phase: push two overlapping balls apart and swap the velocity component
+// along the contact normal (equal-mass elastic response).
+static void resolve(Ball &amp;a, Ball &amp;b)
+{
+    float dx = b.x - a.x, dy = b.y - a.y;
+    float d2 = dx*dx + dy*dy, r = RADIUS * 2;
+    if (d2 &gt;= r*r || d2 &lt; 1e-6f) return;
+    float d = SDL_sqrtf(d2), nx = dx / d, ny = dy / d;
+    float overlap = (r - d) * 0.5f;
+    a.x -= nx * overlap; a.y -= ny * overlap;
+    b.x += nx * overlap; b.y += ny * overlap;
+    float va = a.vx * nx + a.vy * ny, vb = b.vx * nx + b.vy * ny, diff = vb - va;
+    a.vx += diff * nx; a.vy += diff * ny;
+    b.vx -= diff * nx; b.vy -= diff * ny;
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Spatial Hashing", "1.0", "com.example.sdl3.spatialhash");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Spatial Hashing", WIN_W, WIN_H, 0, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+    st-&gt;grid.resize(GW * GH);
+    spawn(st, 400);
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (e-&gt;key.scancode == SDL_SCANCODE_SPACE) st-&gt;use_grid = !st-&gt;use_grid;
+        if (e-&gt;key.scancode == SDL_SCANCODE_UP)   spawn(st, 100);
+        if (e-&gt;key.scancode == SDL_SCANCODE_DOWN &amp;&amp; st-&gt;balls.size() &gt; 100)
+            st-&gt;balls.resize(st-&gt;balls.size() - 100);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+static void collide_bruteforce(AppState *st)
+{
+    int n = (int)st-&gt;balls.size();
+    for (int i = 0; i &lt; n; ++i)
+        for (int j = i + 1; j &lt; n; ++j) resolve(st-&gt;balls[i], st-&gt;balls[j]);
+}
+
+static void collide_grid(AppState *st)
+{
+    for (auto &amp;b : st-&gt;grid) b.clear();
+    int n = (int)st-&gt;balls.size();
+    for (int i = 0; i &lt; n; ++i) {
+        int cx = SDL_clamp((int)(st-&gt;balls[i].x / CELL), 0, GW - 1);
+        int cy = SDL_clamp((int)(st-&gt;balls[i].y / CELL), 0, GH - 1);
+        st-&gt;grid[cy * GW + cx].push_back(i);
+    }
+    // self + E, SW, S, SE covers every unordered neighbour pair exactly once.
+    static const int OX[5] = { 0, 1, -1, 0, 1 };
+    static const int OY[5] = { 0, 0,  1, 1, 1 };
+    for (int cy = 0; cy &lt; GH; ++cy)
+        for (int cx = 0; cx &lt; GW; ++cx) {
+            const auto &amp;here = st-&gt;grid[cy * GW + cx];
+            for (int o = 0; o &lt; 5; ++o) {
+                int nx = cx + OX[o], ny = cy + OY[o];
+                if (nx &lt; 0 || nx &gt;= GW || ny &lt; 0 || ny &gt;= GH) continue;
+                const auto &amp;other = st-&gt;grid[ny * GW + nx];
+                for (size_t a = 0; a &lt; here.size(); ++a)
+                    for (size_t b = (o == 0 ? a + 1 : 0); b &lt; other.size(); ++b)
+                        resolve(st-&gt;balls[here[a]], st-&gt;balls[other[b]]);
+            }
+        }
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float dt = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+
+    for (auto &amp;b : st-&gt;balls) {                 // integrate + bounce off walls
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        if (b.x &lt; RADIUS)         { b.x = RADIUS;         b.vx = -b.vx; }
+        if (b.x &gt; WIN_W - RADIUS) { b.x = WIN_W - RADIUS; b.vx = -b.vx; }
+        if (b.y &lt; RADIUS)         { b.y = RADIUS;         b.vy = -b.vy; }
+        if (b.y &gt; WIN_H - RADIUS) { b.y = WIN_H - RADIUS; b.vy = -b.vy; }
+    }
+
+    // Time only the collision pass with the high-resolution counter.
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    if (st-&gt;use_grid) collide_grid(st); else collide_bruteforce(st);
+    Uint64 t1 = SDL_GetPerformanceCounter();
+    double this_ms = (double)(t1 - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+    st-&gt;ms = st-&gt;ms * 0.9 + this_ms * 0.1;      // smooth the readout
+
+    gfx::clear(st-&gt;renderer, 16, 18, 26);
+    gfx::set_color(st-&gt;renderer, 150, 200, 240, 255);
+    for (const auto &amp;b : st-&gt;balls) gfx::fill_circle(st-&gt;renderer, b.x, b.y, RADIUS);
+
+    // Overlay: a bar whose length encodes the collision time, plus mode/count pips.
+    gfx::set_color(st-&gt;renderer, st-&gt;use_grid ? 120 : 230, st-&gt;use_grid ? 220 : 110, 130, 255);
+    gfx::fill_rect(st-&gt;renderer, 12, 12, (float)SDL_min(400.0, st-&gt;ms * 40.0), 12);
+    gfx::set_color(st-&gt;renderer, 90, 96, 110, 255);
+    gfx::rect(st-&gt;renderer, 12, 12, 400, 12);
+    int pips = (int)st-&gt;balls.size() / 100;    // one pip per 100 balls
+    gfx::set_color(st-&gt;renderer, 200, 210, 230, 255);
+    for (int i = 0; i &lt; pips; ++i) gfx::fill_rect(st-&gt;renderer, 12.0f + i * 10.0f, 32, 6, 6);
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Push the count to a few thousand and watch the brute-force bar hit the ceiling while the grid bar barely moves — the O(n²) vs O(n) gap made visible.</li>
+        <li>Sweep <code>CELL</code> from tiny to huge and note the U-shaped cost: both extremes are slow, one diameter is best.</li>
+        <li>Count the actual narrow-phase tests each mode performs and print the ratio — it's usually one to two orders of magnitude.</li>
+        <li>Store one flat <code>vector&lt;int&gt;</code> with per-cell start offsets (a counting sort) instead of a vector-of-vectors, to kill the per-frame allocations entirely.</li>
+    </ol>
+</section>
+
+<nav class="footnav">
+    <a href="26-astar-pathfinding.html">← 26. A* Pathfinding</a>
+    <a href="index.html">Index</a>
+    <a href="28-mini-game-asteroids.html">Next: Mini Game — Asteroids →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 27
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>28 · GPU-Driven Indirect Rendering — bgfx Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">bgfx Track</a> ›
+    <span>28. GPU-Driven Indirect Rendering</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 28 — GPU-Driven Indirect Rendering</h1>
+    <p class="tagline">
+        The bgfx track's finale. A compute shader culls a huge instance set,
+        compacts the survivors, and writes the <em>draw call itself</em> into an
+        indirect buffer. The CPU issues one <code>submit</code> and never learns how
+        many instances survived — the GPU drives its own rendering.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Compute-side culling with an atomic append into a compacted instance buffer.</li>
+        <li>Writing draw arguments from a shader with <code>drawIndexedIndirect</code> into a <code>createIndirectBuffer</code>.</li>
+        <li>Issuing the draw with <code>bgfx::submit(view, prog, indirectHandle, …)</code> — count decided on the GPU.</li>
+        <li>The compute→draw barrier bgfx inserts for you, and the <code>BGFX_CAPS_DRAW_INDIRECT</code> gate.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        <a href="16-compute-shaders.html">Recipe 16 — Compute Shaders</a> for
+        <code>dispatch</code> and compute-readable/writable buffers,
+        <a href="11-instancing.html">recipe 11</a> for instanced drawing, and
+        <a href="../3d/29-frustum-culling.html">3D recipe 29</a> for the culling idea
+        — moved here from the CPU onto the GPU.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>The indirect buffer holds the draw call</h3>
+    <p>
+        <code>bgfx::createIndirectBuffer(n)</code> reserves storage for
+        <code>n</code> indexed-draw argument sets — index count, instance count,
+        offsets. A compute shader fills it with the
+        <code>drawIndexedIndirect</code> helper, and
+        <code>bgfx::submit(view, program, indirectHandle, start, num)</code> executes
+        those draws. The CPU issues the submit blind; the GPU supplies the numbers.
+    </p>
+<pre><code class="language-cpp">st-&gt;indirect = bgfx::createIndirectBuffer(1);        // room for one indexed draw
+// ... compute fills it ...
+bgfx::setInstanceDataBuffer(st-&gt;instOut, 0, MAX_INST);
+bgfx::submit(1, st-&gt;render, st-&gt;indirect, 0, 1);      // one indirect draw
+</code></pre>
+
+    <h3>Cull and compact in compute</h3>
+    <p>
+        One thread per candidate instance tests visibility. Survivors claim a slot
+        in the output buffer with an <strong>atomic add</strong> on a counter and
+        write their compacted instance data there — the same stream-compaction
+        pattern real GPU-driven engines use.
+    </p>
+<pre><code># cs_cull.sc
+#include "bgfx_compute.sh"
+BUFFER_RO(instanceIn,  vec4, 0);      // all candidates: xyz position, w hue
+BUFFER_WR(instanceOut, vec4, 1);      // compacted survivors
+BUFFER_RW(drawCount,   uint, 2);      // single atomic counter
+uniform vec4 u_cullTotal;             // x = candidate count
+uniform vec4 u_cullSphere;            // xyz centre, w radius
+NUM_THREADS(64, 1, 1)
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id &gt;= uint(u_cullTotal.x)) return;
+    vec4 inst = instanceIn[id];
+    if (length(inst.xyz - u_cullSphere.xyz) &gt; u_cullSphere.w) return;  // culled
+    uint slot = atomicFetchAndAdd(drawCount[0], 1u);                   // claim a slot
+    instanceOut[slot] = inst;                                          // compact
+}
+</code></pre>
+
+    <h3>Write the draw args, reset the counter</h3>
+    <p>
+        A one-thread pass reads the survivor count and writes the indexed-draw
+        arguments, then zeroes the counter so next frame's cull starts clean. That
+        single reset is what keeps the whole thing to two dispatches and no CPU
+        readback.
+    </p>
+<pre><code># cs_genargs.sc
+#include "bgfx_compute.sh"
+BUFFER_RW(drawCount,      uint,  0);
+BUFFER_WR(indirectBuffer, uvec4, 1);
+uniform vec4 u_drawParams;            // x = index count of the mesh
+NUM_THREADS(1, 1, 1)
+void main() {
+    uint count = drawCount[0];
+    drawIndexedIndirect(indirectBuffer, 0u, uint(u_drawParams.x), count, 0u, 0u, 0u);
+    drawCount[0] = 0u;                 // prime for next frame
+}
+</code></pre>
+
+    <div class="note">
+        <strong>bgfx inserts the barriers.</strong> The counter and buffers are
+        written by compute and read by the next dispatch or the draw; bgfx sees the
+        dependency and synchronises for you — exactly as it did for the compute
+        particles in recipe 16. Needs
+        <code>bgfx::getCaps()-&gt;supported &amp; BGFX_CAPS_DRAW_INDIRECT</code>.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        Thousands of cubes fill a volume, but only those inside a roaming sphere are
+        culled-in, compacted and drawn — the sphere's contents pop in and out as it
+        moves, all decided on the GPU in one indirect draw. Native-handle /
+        <code>loadProgram</code> / <code>loadComputeProgram</code> helpers identical
+        to recipes 03 and 16 (elided). Shaders: <code>cs_cull</code>,
+        <code>cs_genargs</code>, <code>vs_render</code> / <code>fs_render</code>.
+    </p>
+<pre><code class="language-cpp">/*
+ * bgfx/28-gpu-driven-indirect.cpp — compute culls + compacts instances and writes
+ * an indirect draw; the CPU issues one submit with a GPU-decided instance count.
+ * Native-handle + loadProgram/loadComputeProgram helpers as recipes 03/16 (elided).
+ * Shaders: cs_cull, cs_genargs, vs_render/fs_render.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;bgfx/bgfx.h&gt;
+#include &lt;bgfx/platform.h&gt;
+#include &lt;bx/math.h&gt;
+#include &lt;cstdint&gt;
+#include &lt;vector&gt;
+
+static void *nativeWindowHandle(SDL_Window *);
+static void *nativeDisplayHandle(SDL_Window *);
+static bgfx::ProgramHandle loadProgram(const char *vs, const char *fs);
+static bgfx::ProgramHandle loadComputeProgram(const char *cs);
+
+struct PNVertex { float px, py, pz; float nx, ny, nz; };
+static const PNVertex kCube[24] = {
+    {  0.5f,-0.5f,-0.5f, 1,0,0 },{  0.5f, 0.5f,-0.5f, 1,0,0 },{  0.5f, 0.5f, 0.5f, 1,0,0 },{  0.5f,-0.5f, 0.5f, 1,0,0 },
+    { -0.5f,-0.5f, 0.5f,-1,0,0 },{ -0.5f, 0.5f, 0.5f,-1,0,0 },{ -0.5f, 0.5f,-0.5f,-1,0,0 },{ -0.5f,-0.5f,-0.5f,-1,0,0 },
+    { -0.5f, 0.5f,-0.5f, 0,1,0 },{ -0.5f, 0.5f, 0.5f, 0,1,0 },{  0.5f, 0.5f, 0.5f, 0,1,0 },{  0.5f, 0.5f,-0.5f, 0,1,0 },
+    { -0.5f,-0.5f, 0.5f, 0,-1,0 },{ -0.5f,-0.5f,-0.5f, 0,-1,0 },{  0.5f,-0.5f,-0.5f, 0,-1,0 },{  0.5f,-0.5f, 0.5f, 0,-1,0 },
+    { -0.5f,-0.5f, 0.5f, 0,0,1 },{  0.5f,-0.5f, 0.5f, 0,0,1 },{  0.5f, 0.5f, 0.5f, 0,0,1 },{ -0.5f, 0.5f, 0.5f, 0,0,1 },
+    {  0.5f,-0.5f,-0.5f, 0,0,-1 },{ -0.5f,-0.5f,-0.5f, 0,0,-1 },{ -0.5f, 0.5f,-0.5f, 0,0,-1 },{  0.5f, 0.5f,-0.5f, 0,0,-1 },
+};
+static const uint16_t kIdx[36] = {
+    0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+    12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23,
+};
+
+static const int SIDE = 20;                         // SIDE^3 candidate instances
+static const int MAX_INST = SIDE * SIDE * SIDE;     // 8000
+
+struct AppState {
+    SDL_Window *window = nullptr; int width = 1280, height = 720;
+    bgfx::VertexLayout meshLayout, instLayout;
+    bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
+    bgfx::IndexBufferHandle  ibh = BGFX_INVALID_HANDLE;
+    bgfx::VertexBufferHandle instIn = BGFX_INVALID_HANDLE;           // all candidates (compute-read)
+    bgfx::DynamicVertexBufferHandle instOut = BGFX_INVALID_HANDLE;   // compacted (compute-write + instance data)
+    bgfx::DynamicIndexBufferHandle  drawCount = BGFX_INVALID_HANDLE; // single atomic counter
+    bgfx::IndirectBufferHandle indirect = BGFX_INVALID_HANDLE;
+    bgfx::ProgramHandle cull = BGFX_INVALID_HANDLE, genargs = BGFX_INVALID_HANDLE, render = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_cullTotal = BGFX_INVALID_HANDLE, u_cullSphere = BGFX_INVALID_HANDLE, u_drawParams = BGFX_INVALID_HANDLE, u_lightDir = BGFX_INVALID_HANDLE;
+    bool ok = false; Uint64 startNs = 0;
+};
+
+static SDL_AppResult fail(const char *what) { SDL_Log("%s: %s", what, SDL_GetError()); return SDL_APP_FAILURE; }
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("bgfx GPU-Driven", "1.0", "com.example.sdl3.bgfx.gdr");
+    if (!SDL_Init(SDL_INIT_VIDEO)) return fail("SDL_Init");
+    AppState *st = new AppState(); *appstate = st;
+    st-&gt;window = SDL_CreateWindow("bgfx — GPU-Driven Indirect Rendering", st-&gt;width, st-&gt;height,
+                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!st-&gt;window) return fail("SDL_CreateWindow");
+    SDL_GetWindowSizeInPixels(st-&gt;window, &amp;st-&gt;width, &amp;st-&gt;height);
+
+    bgfx::renderFrame();
+    bgfx::Init init;
+    init.type = bgfx::RendererType::Count;
+    init.platformData.nwh = nativeWindowHandle(st-&gt;window);
+    init.platformData.ndt = nativeDisplayHandle(st-&gt;window);
+    init.resolution.width = (uint32_t)st-&gt;width; init.resolution.height = (uint32_t)st-&gt;height;
+    init.resolution.reset = BGFX_RESET_VSYNC;
+    if (!bgfx::init(init)) return fail("bgfx::init");
+    bgfx::setDebug(BGFX_DEBUG_TEXT);
+
+    uint32_t caps = bgfx::getCaps()-&gt;supported;
+    st-&gt;ok = (caps &amp; BGFX_CAPS_COMPUTE) &amp;&amp; (caps &amp; BGFX_CAPS_DRAW_INDIRECT);
+    if (!st-&gt;ok) SDL_Log("GPU-driven rendering needs BGFX_CAPS_COMPUTE + BGFX_CAPS_DRAW_INDIRECT");
+
+    st-&gt;meshLayout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Normal,   3, bgfx::AttribType::Float).end();
+    // One vec4 per instance (xyz position, w hue), read in compute and fed as instance data.
+    st-&gt;instLayout.begin().add(bgfx::Attrib::TexCoord7, 4, bgfx::AttribType::Float).end();
+
+    st-&gt;vbh = bgfx::createVertexBuffer(bgfx::makeRef(kCube, sizeof(kCube)), st-&gt;meshLayout);
+    st-&gt;ibh = bgfx::createIndexBuffer (bgfx::makeRef(kIdx, sizeof(kIdx)));
+
+    // Candidate instances: a SIDE^3 lattice, compute-readable.
+    std::vector&lt;float&gt; cand(MAX_INST * 4);
+    for (int i = 0; i &lt; MAX_INST; ++i) {
+        int x = i % SIDE, y = (i / SIDE) % SIDE, z = i / (SIDE*SIDE);
+        cand[i*4+0] = (x - SIDE*0.5f) * 1.6f;
+        cand[i*4+1] = (y - SIDE*0.5f) * 1.6f;
+        cand[i*4+2] = (z - SIDE*0.5f) * 1.6f;
+        cand[i*4+3] = (float)i / MAX_INST;                 // hue
+    }
+    st-&gt;instIn = bgfx::createVertexBuffer(
+        bgfx::copy(cand.data(), (uint32_t)(cand.size()*sizeof(float))), st-&gt;instLayout,
+        BGFX_BUFFER_COMPUTE_READ);
+    st-&gt;instOut = bgfx::createDynamicVertexBuffer(MAX_INST, st-&gt;instLayout,
+        BGFX_BUFFER_COMPUTE_WRITE);
+    st-&gt;drawCount = bgfx::createDynamicIndexBuffer(1,
+        BGFX_BUFFER_COMPUTE_READ_WRITE | BGFX_BUFFER_INDEX32);   // starts zeroed
+    st-&gt;indirect = bgfx::createIndirectBuffer(1);
+
+    st-&gt;cull    = loadComputeProgram("cs_cull");
+    st-&gt;genargs = loadComputeProgram("cs_genargs");
+    st-&gt;render  = loadProgram("vs_render", "fs_render");
+    st-&gt;u_cullTotal  = bgfx::createUniform("u_cullTotal",  bgfx::UniformType::Vec4);
+    st-&gt;u_cullSphere = bgfx::createUniform("u_cullSphere", bgfx::UniformType::Vec4);
+    st-&gt;u_drawParams = bgfx::createUniform("u_drawParams", bgfx::UniformType::Vec4);
+    st-&gt;u_lightDir   = bgfx::createUniform("u_lightDir",   bgfx::UniformType::Vec4);
+    if (!bgfx::isValid(st-&gt;cull) || !bgfx::isValid(st-&gt;render)) return fail("loadProgram");
+
+    st-&gt;startNs = SDL_GetTicksNS();
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN &amp;&amp; e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+        st-&gt;width = e-&gt;window.data1; st-&gt;height = e-&gt;window.data2;
+        bgfx::reset((uint32_t)st-&gt;width, (uint32_t)st-&gt;height, BGFX_RESET_VSYNC);
+    }
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    float t = (float)(SDL_GetTicksNS() - st-&gt;startNs) / 1.0e9f;
+
+    if (!st-&gt;ok) {                                             // graceful fallback message
+        bgfx::setViewRect(0, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+        bgfx::setViewClear(0, BGFX_CLEAR_COLOR, 0x201010ff, 1.0f, 0);
+        bgfx::touch(0);
+        bgfx::dbgTextClear();
+        bgfx::dbgTextPrintf(1, 1, 0x0c, "BGFX_CAPS_DRAW_INDIRECT / COMPUTE unsupported on this backend");
+        bgfx::frame();
+        return SDL_APP_CONTINUE;
+    }
+
+    // A roaming cull sphere so the visible set changes every frame.
+    float cx = SDL_cosf(t*0.5f) * 8.0f, cy = SDL_sinf(t*0.7f) * 6.0f, cz = SDL_sinf(t*0.4f) * 8.0f;
+    float total[4] = { (float)MAX_INST, 0, 0, 0 };
+    float sphere[4] = { cx, cy, cz, 7.0f };
+    float draw[4]  = { 36.0f, 0, 0, 0 };                      // index count of the cube
+
+    // --- Pass A (view 0, compute): cull + compact ---
+    bgfx::setUniform(st-&gt;u_cullTotal,  total);
+    bgfx::setUniform(st-&gt;u_cullSphere, sphere);
+    bgfx::setBuffer(0, st-&gt;instIn,    bgfx::Access::Read);
+    bgfx::setBuffer(1, st-&gt;instOut,   bgfx::Access::Write);
+    bgfx::setBuffer(2, st-&gt;drawCount, bgfx::Access::ReadWrite);
+    bgfx::dispatch(0, st-&gt;cull, (MAX_INST + 63) / 64, 1, 1);
+
+    // --- Pass B (view 0, compute): write the indirect draw args ---
+    bgfx::setUniform(st-&gt;u_drawParams, draw);
+    bgfx::setBuffer(0, st-&gt;drawCount, bgfx::Access::ReadWrite);
+    bgfx::setBuffer(1, st-&gt;indirect,  bgfx::Access::Write);
+    bgfx::dispatch(0, st-&gt;genargs, 1, 1, 1);
+
+    // --- Render (view 1): one indirect instanced draw ---
+    bgfx::setViewRect(1, 0, 0, (uint16_t)st-&gt;width, (uint16_t)st-&gt;height);
+    bgfx::setViewClear(1, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x0a0c12ff, 1.0f, 0);
+    const bx::Vec3 at = { 0, 0, 0 }, eye = { 0, 6.0f, -30.0f };
+    float view[16], proj[16];
+    bx::mtxLookAt(view, eye, at);
+    bx::mtxProj(proj, 60.0f, float(st-&gt;width)/float(st-&gt;height), 0.1f, 200.0f, bgfx::getCaps()-&gt;homogeneousDepth);
+    bgfx::setViewTransform(1, view, proj);
+    float ld[4] = { -0.4f, -0.7f, -0.5f, 0 };
+    bgfx::setUniform(st-&gt;u_lightDir, ld);
+
+    bgfx::setVertexBuffer(0, st-&gt;vbh);
+    bgfx::setIndexBuffer(st-&gt;ibh);
+    bgfx::setInstanceDataBuffer(st-&gt;instOut, 0, MAX_INST);
+    bgfx::setState(BGFX_STATE_DEFAULT);
+    bgfx::submit(1, st-&gt;render, st-&gt;indirect, 0, 1);           // GPU decides the instance count
+
+    bgfx::dbgTextClear();
+    bgfx::dbgTextPrintf(1, 1, 0x0f, "GPU-driven: %d candidates, culled + drawn on the GPU", MAX_INST);
+    bgfx::frame();
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (!st) return;
+    bgfx::UniformHandle us[] = { st-&gt;u_lightDir, st-&gt;u_drawParams, st-&gt;u_cullSphere, st-&gt;u_cullTotal };
+    for (bgfx::UniformHandle u : us) if (bgfx::isValid(u)) bgfx::destroy(u);
+    if (bgfx::isValid(st-&gt;indirect))  bgfx::destroy(st-&gt;indirect);
+    if (bgfx::isValid(st-&gt;drawCount)) bgfx::destroy(st-&gt;drawCount);
+    if (bgfx::isValid(st-&gt;instOut))   bgfx::destroy(st-&gt;instOut);
+    if (bgfx::isValid(st-&gt;instIn))    bgfx::destroy(st-&gt;instIn);
+    if (bgfx::isValid(st-&gt;ibh))       bgfx::destroy(st-&gt;ibh);
+    if (bgfx::isValid(st-&gt;vbh))       bgfx::destroy(st-&gt;vbh);
+    if (bgfx::isValid(st-&gt;render))    bgfx::destroy(st-&gt;render);
+    if (bgfx::isValid(st-&gt;genargs))   bgfx::destroy(st-&gt;genargs);
+    if (bgfx::isValid(st-&gt;cull))      bgfx::destroy(st-&gt;cull);
+    bgfx::shutdown();
+    SDL_DestroyWindow(st-&gt;window);
+    delete st;
+}
+</code></pre>
+<pre><code># cs_cull.sc — one thread per candidate; keep those inside the sphere, compact them
+#include "bgfx_compute.sh"
+BUFFER_RO(instanceIn,  vec4, 0);
+BUFFER_WR(instanceOut, vec4, 1);
+BUFFER_RW(drawCount,   uint, 2);
+uniform vec4 u_cullTotal;             // x = candidate count
+uniform vec4 u_cullSphere;            // xyz centre, w radius
+NUM_THREADS(64, 1, 1)
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id &gt;= uint(u_cullTotal.x)) return;
+    vec4 inst = instanceIn[id];
+    if (length(inst.xyz - u_cullSphere.xyz) &gt; u_cullSphere.w) return;   // outside: cull
+    uint slot = atomicFetchAndAdd(drawCount[0], 1u);                    // claim output slot
+    instanceOut[slot] = inst;
+}
+</code></pre>
+<pre><code># cs_genargs.sc — turn the survivor count into an indexed indirect draw
+#include "bgfx_compute.sh"
+BUFFER_RW(drawCount,      uint,  0);
+BUFFER_WR(indirectBuffer, uvec4, 1);
+uniform vec4 u_drawParams;            // x = index count of the mesh
+NUM_THREADS(1, 1, 1)
+void main() {
+    uint count = drawCount[0];
+    // (buffer, index, numIndices, numInstances, startIndex, startVertex, startInstance)
+    drawIndexedIndirect(indirectBuffer, 0u, uint(u_drawParams.x), count, 0u, 0u, 0u);
+    drawCount[0] = 0u;                // reset for next frame
+}
+</code></pre>
+<pre><code># vs_render.sc / fs_render.sc — instanced cube coloured by its hue
+# (vs)
+$input  a_position, a_normal, i_data0
+$output v_normal, v_color
+#include "bgfx_shader.sh"
+void main() {
+    vec3 world  = a_position + i_data0.xyz;          // per-instance offset
+    gl_Position = mul(u_viewProj, vec4(world, 1.0));
+    v_normal    = a_normal;
+    float h = i_data0.w * 6.2831;
+    v_color = vec3(0.5+0.5*sin(h), 0.5+0.5*sin(h+2.09), 0.5+0.5*sin(h+4.19));
+}
+# (fs)
+$input v_normal, v_color
+#include "bgfx_shader.sh"
+uniform vec4 u_lightDir;
+void main() {
+    float diff = max(dot(normalize(v_normal), normalize(-u_lightDir.xyz)), 0.0);
+    gl_FragColor = vec4(v_color * (0.3 + 0.75 * diff), 1.0);
+}
+</code></pre>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Swap the sphere test for the recipe-29 frustum planes (pass them as uniforms) so the GPU does true frustum culling.</li>
+        <li>Read the count back: <code>bgfx::createDynamicIndexBuffer</code> with a readback, or blit the counter to a CPU-visible buffer, and print the live survivor count.</li>
+        <li>Per-instance LOD: pick one of several meshes per instance and emit several indirect draws (one per LOD) from <code>cs_genargs</code>.</li>
+        <li>Push <code>SIDE</code> to 40 (64 000 candidates). The CPU cost doesn't move — it still issues exactly one <code>submit</code>.</li>
+    </ol>
+    <p>
+        And that completes the bgfx track — and the SDL3 Recipes curriculum. You
+        wired SDL3's native window into bgfx, drew your first triangle, then climbed
+        through buffers, transforms, textures, instancing, mesh loading, picking,
+        post-processing, compute, skyboxes, normal and shadow mapping, PBR,
+        particles, the stencil buffer, deferred rendering, HDR, SSAO, occlusion
+        queries and now GPU-driven indirect rendering — the same arc you walked in
+        the <a href="../2d/index.html">2D</a> and <a href="../3d/index.html">3D</a>
+        tracks, here on a graphics-API-agnostic renderer. Three renderers, one
+        callback skeleton, learned once and reused everywhere. From here the natural
+        next step is to build something of your own — the toolkit is complete.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="27-occlusion-queries.html">← 27. Occlusion Queries</a>
+    <a href="index.html">Index</a>
+    <a href="../index.html">All tracks →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">bgfx Track</a> · Recipe 28
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

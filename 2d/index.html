@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>2D Track — SDL3 Recipes</title>
-    <meta name="description" content="Twenty-four C++ callback-style SDL3 recipes for 2D games, using SDL_Renderer. Beginner to advanced.">
+    <meta name="description" content="Twenty-eight C++ callback-style SDL3 recipes for 2D games, using SDL_Renderer. Beginner to advanced.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,13 +19,14 @@
 <header class="hero">
     <h1>2D Track</h1>
     <p class="lede">
-        Twenty-four recipes that take you from opening a window to a
+        Twenty-eight recipes that take you from opening a window to a
         controller-driven, audio-mixing game with an offscreen pixel-art pipeline,
         custom meshes, sprite transforms, a fixed-timestep loop, a 2D lighting
-        pass, split-screen viewports, a follow camera, tweening and a scene
-        stack — all in C++ with SDL3's callback model and the high-level
-        <code>SDL_Renderer</code> drawing API. Each one builds on the previous —
-        work through them in order.
+        pass, split-screen viewports, a follow camera, tweening, a scene
+        stack, streaming pixel effects, A* pathfinding, spatial hashing and a
+        vector-Asteroids capstone — all in C++ with SDL3's callback model and the
+        high-level <code>SDL_Renderer</code> drawing API. Each one builds on the
+        previous — work through them in order.
     </p>
 </header>
 
@@ -245,6 +246,42 @@
             <span class="title">
                 <a href="24-scene-state-stack.html">Scene/State Stack</a>
                 <div class="blurb">A polymorphic <code>Scene</code> stack — menu, play, a translucent pause overlay — with deferred push/pop transitions.</div>
+            </span>
+            <span class="badge badge-advanced">Advanced</span>
+        </li>
+
+        <li>
+            <span class="num">25</span>
+            <span class="title">
+                <a href="25-streaming-textures.html">Streaming Textures &amp; Pixel Effects</a>
+                <div class="blurb"><code>SDL_TEXTUREACCESS_STREAMING</code> + <code>SDL_LockTexture</code>: a rolling fire and a plasma field written pixel-by-pixel, honouring the row pitch.</div>
+            </span>
+            <span class="badge badge-intermediate">Intermediate</span>
+        </li>
+
+        <li>
+            <span class="num">26</span>
+            <span class="title">
+                <a href="26-astar-pathfinding.html">A* Pathfinding</a>
+                <div class="blurb">Shortest paths over a tile grid with a binary-heap open set and a Manhattan heuristic; click to send an agent around the walls.</div>
+            </span>
+            <span class="badge badge-intermediate">Intermediate</span>
+        </li>
+
+        <li>
+            <span class="num">27</span>
+            <span class="title">
+                <a href="27-spatial-hashing.html">Spatial Hashing</a>
+                <div class="blurb">A uniform-grid broad phase for hundreds of colliding entities — brute force vs. grid, timed live with <code>SDL_GetPerformanceCounter</code>.</div>
+            </span>
+            <span class="badge badge-advanced">Advanced</span>
+        </li>
+
+        <li>
+            <span class="num">28</span>
+            <span class="title">
+                <a href="28-mini-game-asteroids.html">Mini Game: Asteroids</a>
+                <div class="blurb">Capstone — wrap-around vector flight, splitting rocks, particle bursts and screen shake on a fixed-timestep core.</div>
             </span>
             <span class="badge badge-advanced">Advanced</span>
         </li>

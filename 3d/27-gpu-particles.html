@@ -374,21 +374,20 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         <li>Swap the sine field for true curl noise so the flow is divergence-free and never bunches up.</li>
     </ol>
     <p>
-        And that completes the 3D track. From a single triangle you built a lit,
-        textured, shadowed world, authored cross-platform shaders, and finished with
-        many-light forward and deferred shading, tone mapping, reflections,
-        screen-space ambient occlusion, and a GPU particle system — the toolkit of a
-        modern real-time engine. The <a href="../bgfx/index.html">bgfx Track</a>
-        rebuilds this same arc on a graphics-API-agnostic renderer: SDL3 still owns
-        the window and input, while bgfx drives the backend — right down to its own
-        <a href="../bgfx/22-compute-particles.html">compute particle system</a>.
+        Particles round out the compute story. The next recipes turn the toolkit
+        outward into a full outdoor scene: procedural terrain and fog, GPU frustum
+        culling, cascaded shadow maps for shadows that stay crisp to the horizon,
+        and reflective <a href="31-water-planar-reflections.html">water</a> to close
+        the track — after which the <a href="../bgfx/index.html">bgfx Track</a>
+        rebuilds the same arc on a graphics-API-agnostic renderer, right down to its
+        own <a href="../bgfx/22-compute-particles.html">compute particle system</a>.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="26-ssao.html">← 26. Screen-Space Ambient Occlusion</a>
     <a href="index.html">Index</a>
-    <a href="../bgfx/index.html">bgfx Track →</a>
+    <a href="28-terrain-and-fog.html">Next: Procedural Terrain &amp; Fog →</a>
 </nav>
 
 </main>

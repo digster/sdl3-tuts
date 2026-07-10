@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SDL3 Recipes — 2D, 3D & bgfx Game Tutorials in C++</title>
-    <meta name="description" content="A progressive, callback-style C++ curriculum for SDL3: 24 recipes for 2D games (SDL_Renderer), 27 for 3D graphics (SDL_GPU) with cross-platform shaders via SDL_shadercross, and 24 for the bgfx renderer (Metal/Vulkan/D3D behind one API). Beginner to advanced.">
+    <meta name="description" content="A progressive, callback-style C++ curriculum for SDL3: 28 recipes for 2D games (SDL_Renderer), 31 for 3D graphics (SDL_GPU) with cross-platform shaders via SDL_shadercross, and 28 for the bgfx renderer (Metal/Vulkan/D3D behind one API). Beginner to advanced.">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,11 +18,12 @@
 <header class="hero">
     <h1>SDL3 Recipes</h1>
     <p class="lede">
-        A progressive, callback-style C++ curriculum for SDL3 — twenty-four recipes
-        for 2D games, twenty-seven for 3D graphics (cross-platform shaders, skyboxes,
-        shadows, GPU compute, many lights, a deferred renderer, SSAO and GPU
-        particles), and twenty-four for driving the
-        <a href="https://github.com/bkaradzic/bgfx">bgfx</a> renderer, ordered
+        A progressive, callback-style C++ curriculum for SDL3 — twenty-eight recipes
+        for 2D games, thirty-one for 3D graphics (cross-platform shaders, skyboxes,
+        shadows, GPU compute, many lights, a deferred renderer, SSAO, GPU particles,
+        procedural terrain, cascaded shadows and reflective water), and twenty-eight
+        for driving the <a href="https://github.com/bkaradzic/bgfx">bgfx</a> renderer
+        (through HDR, occlusion queries and GPU-driven rendering), ordered
         beginner to advanced. Every snippet uses the same
         <code>SDL_AppInit</code> / <code>SDL_AppEvent</code> /
         <code>SDL_AppIterate</code> / <code>SDL_AppQuit</code> skeleton, so you
@@ -35,7 +36,7 @@
     <div class="track-cards">
 
         <a class="card" href="2d/index.html">
-            <div class="meta">24 recipes · SDL_Renderer</div>
+            <div class="meta">28 recipes · SDL_Renderer</div>
             <h2>2D Track</h2>
             <p>
                 Open a window, draw shapes, load textures, animate sprites, detect
@@ -46,7 +47,7 @@
         </a>
 
         <a class="card" href="3d/index.html">
-            <div class="meta">27 recipes · SDL_GPU + SDL_shadercross</div>
+            <div class="meta">31 recipes · SDL_GPU + SDL_shadercross</div>
             <h2>3D Track</h2>
             <p>
                 Drop one tier below SDL_Renderer to SDL_GPU — Metal / Vulkan /
@@ -58,7 +59,7 @@
         </a>
 
         <a class="card" href="bgfx/index.html">
-            <div class="meta">24 recipes · bgfx + shaderc</div>
+            <div class="meta">28 recipes · bgfx + shaderc</div>
             <h2>bgfx Track</h2>
             <p>
                 Step outside SDL for the rendering: wire SDL3's native window
@@ -130,7 +131,8 @@
         Simple UI · Render Targets &amp; Screen Effects · SDL_RenderGeometry
         Meshes · Sprite Rotation &amp; Flip · Fixed Timestep · Blend Modes &amp;
         2D Lighting · Clipping &amp; Viewports · Camera &amp; Parallax Scrolling ·
-        Tweening &amp; Easing · Scene/State Stack.
+        Tweening &amp; Easing · Scene/State Stack · Streaming Textures &amp; Pixel
+        Effects · A* Pathfinding · Spatial Hashing · Mini Game: Asteroids.
     </p>
     <h3>3D — <code>SDL_GPU</code></h3>
     <p>
@@ -142,7 +144,8 @@
         Rendering · Post-Processing &amp; Bloom · Alpha Blending &amp; Transparency
         · Mipmaps &amp; MSAA · Point &amp; Spot Lights · Tone Mapping &amp; Gamma ·
         Environment Reflections · Deferred Shading · Screen-Space Ambient
-        Occlusion · GPU Particles.
+        Occlusion · GPU Particles · Procedural Terrain &amp; Fog · Frustum Culling ·
+        Cascaded Shadow Maps · Water &amp; Planar Reflections.
     </p>
     <h3>bgfx — <code>bgfx</code> + <code>shaderc</code></h3>
     <p>
@@ -153,7 +156,9 @@
         Instanced Scene · Loading a Mesh · Mouse Picking · Post-Processing &amp;
         Bloom · Compute Shaders · Skybox &amp; Cubemaps · Normal Mapping · Shadow
         Mapping · Transient &amp; Dynamic Buffers · PBR &amp; Image-Based Lighting ·
-        Compute Particles · Stencil Reflections &amp; Outlines · Deferred Rendering.
+        Compute Particles · Stencil Reflections &amp; Outlines · Deferred Rendering ·
+        HDR &amp; Tone Mapping · SSAO · Occlusion Queries · GPU-Driven Indirect
+        Rendering.
     </p>
 </section>
 

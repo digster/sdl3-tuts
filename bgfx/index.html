@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>bgfx Track — SDL3 Recipes</title>
-    <meta name="description" content="Twenty-four C++ callback-style SDL3 recipes that drive bgfx — a graphics-API-agnostic renderer (Metal / Vulkan / D3D / OpenGL behind one API). From wiring SDL3's native window handle into bgfx to a lit, textured, instanced scene, mesh loading, picking, bloom, GPU compute, skybox cubemaps, normal and shadow mapping, transient/dynamic buffers, PBR with image-based lighting, compute particles, stencil reflections and deferred rendering — with the full shaderc cross-backend shader workflow.">
+    <meta name="description" content="Twenty-eight C++ callback-style SDL3 recipes that drive bgfx — a graphics-API-agnostic renderer (Metal / Vulkan / D3D / OpenGL behind one API). From wiring SDL3's native window handle into bgfx to a lit, textured, instanced scene, mesh loading, picking, bloom, GPU compute, skybox cubemaps, normal and shadow mapping, transient/dynamic buffers, PBR with image-based lighting, compute particles, stencil reflections, deferred rendering, HDR tone mapping, SSAO, occlusion queries and GPU-driven indirect rendering — with the full shaderc cross-backend shader workflow.">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -19,7 +19,7 @@
 <header class="hero">
     <h1>bgfx Track</h1>
     <p class="lede">
-        Twenty-four recipes that pair SDL3 with <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
+        Twenty-eight recipes that pair SDL3 with <a href="https://github.com/bkaradzic/bgfx">bgfx</a>
         — a "bring your own engine", graphics-API-agnostic renderer that puts
         Metal, Vulkan, Direct3D and OpenGL behind one C++ API. SDL3 owns the
         window, events and timing; bgfx owns the pixels. You'll learn the one
@@ -29,10 +29,11 @@
         textured, instanced scene, and on to mesh loading, picking, bloom and
         GPU compute, before reaching parity with the 3D track's advanced
         chapters: skybox cubemaps, normal and shadow mapping, bgfx's own
-        transient and dynamic buffers, and finally modern shading — PBR with
+        transient and dynamic buffers, and on to modern shading — PBR with
         image-based lighting, a flow-field GPU particle system, the stencil buffer
-        and a deferred renderer — with shaders authored once and compiled to every
-        backend.
+        and a deferred renderer — before finishing on bgfx's frontier: HDR tone
+        mapping, SSAO, GPU occlusion queries and a GPU-driven indirect renderer,
+        with shaders authored once and compiled to every backend.
     </p>
 </header>
 
@@ -158,6 +159,26 @@
         <li><span class="num">24</span>
             <span class="title"><a href="24-deferred-rendering.html">Deferred Rendering</a>
             <div class="blurb">A multi-attachment <code>FrameBuffer</code> G-buffer and a fullscreen lighting view — the bgfx counterpart to 3D recipe 25.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">25</span>
+            <span class="title"><a href="25-hdr-tone-mapping.html">HDR &amp; Tone Mapping</a>
+            <div class="blurb">An <code>RGBA16F</code> framebuffer tone-mapped (clamp / Reinhard / ACES) with exposure and gamma — the bgfx twin of 3D recipe 23.</div></span>
+            <span class="badge badge-intermediate">Intermediate</span></li>
+
+        <li><span class="num">26</span>
+            <span class="title"><a href="26-ssao.html">Screen-Space Ambient Occlusion</a>
+            <div class="blurb">A hemisphere kernel + tiled noise over recipe 24's view-space G-buffer, blurred and composited — the bgfx twin of 3D recipe 26.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">27</span>
+            <span class="title"><a href="27-occlusion-queries.html">Occlusion Queries</a>
+            <div class="blurb"><code>createOcclusionQuery</code> + <code>getResult</code> + <code>setCondition</code> — skip drawing what's hidden behind an occluder. A bgfx-native feature.</div></span>
+            <span class="badge badge-advanced">Advanced</span></li>
+
+        <li><span class="num">28</span>
+            <span class="title"><a href="28-gpu-driven-indirect.html">GPU-Driven Indirect Rendering</a>
+            <div class="blurb">Compute culls and compacts instances and writes the draw itself via <code>drawIndexedIndirect</code> into a <code>createIndirectBuffer</code>.</div></span>
             <span class="badge badge-advanced">Advanced</span></li>
 
     </ul>

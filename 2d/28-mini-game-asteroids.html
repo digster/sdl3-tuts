@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>28 · Mini Game — Asteroids — 2D Track — SDL3 Recipes</title>
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <a href="../index.html">SDL3 Recipes</a> ›
+    <a href="index.html">2D Track</a> ›
+    <span>28. Mini Game — Asteroids</span>
+</nav>
+
+<main>
+
+<header class="recipe-header">
+    <span class="badge badge-advanced">Advanced</span>
+    <h1>Recipe 28 — Mini Game: Asteroids</h1>
+    <p class="tagline">
+        The 2D track's second capstone. A vector-graphics Asteroids that pulls
+        together the whole track: a wrap-around world, thrust-and-inertia flight,
+        splitting rocks, a particle burst on every hit, screen shake for impact,
+        and a fixed-timestep core keeping it deterministic.
+    </p>
+</header>
+
+<section>
+    <h2>What you'll learn</h2>
+    <ul>
+        <li>Wrap-around ("toroidal") space and drawing polygons with <code>SDL_RenderLines</code>.</li>
+        <li>Newtonian ship control: thrust adds to velocity, nothing removes it but drag.</li>
+        <li>A pooled bullet + asteroid + particle system with spawn / update / cull.</li>
+        <li>Feel: rocks that split, a particle burst and screen shake on each impact, and a simple play / game-over state flip.</li>
+    </ul>
+</section>
+
+<section>
+    <h2>Prerequisites</h2>
+    <p>
+        This is where the track converges. <a href="11-particle-systems.html">Recipe
+        11</a> is the debris, <a href="19-fixed-timestep.html">recipe 19</a> the
+        deterministic loop, <a href="16-render-targets.html">recipe 16</a> the screen
+        shake, and <a href="24-scene-state-stack.html">recipe 24</a> the play /
+        game-over states — folded into one small game.
+    </p>
+</section>
+
+<section>
+    <h2>Walkthrough</h2>
+
+    <h3>A wrap-around world</h3>
+    <p>
+        Everything — ship, bullets, rocks — lives on a torus: leave the right edge
+        and reappear on the left. One helper wraps any position after integration,
+        so no object is ever "off screen".
+    </p>
+<pre><code class="language-cpp">static void wrap(float &amp;x, float &amp;y) {
+    if (x &lt; 0) x += WIN_W;  else if (x &gt;= WIN_W) x -= WIN_W;
+    if (y &lt; 0) y += WIN_H;  else if (y &gt;= WIN_H) y -= WIN_H;
+}
+</code></pre>
+
+    <h3>Thrust and inertia</h3>
+    <p>
+        The ship has a heading angle and a velocity vector. Rotation only changes
+        the angle; thrust adds a small push <em>along</em> the heading to the
+        velocity. With just a little drag, releasing thrust lets you coast — the
+        essence of the game's feel.
+    </p>
+<pre><code class="language-cpp">if (k[SDL_SCANCODE_LEFT])  ship.a -= 3.2f * dt;
+if (k[SDL_SCANCODE_RIGHT]) ship.a += 3.2f * dt;
+if (k[SDL_SCANCODE_UP]) {                       // accelerate along the nose
+    ship.vx += SDL_cosf(ship.a) * 260.0f * dt;
+    ship.vy += SDL_sinf(ship.a) * 260.0f * dt;
+}
+ship.vx *= 0.995f; ship.vy *= 0.995f;           // gentle drag
+ship.x += ship.vx * dt; ship.y += ship.vy * dt; wrap(ship.x, ship.y);
+</code></pre>
+
+    <h3>Rocks that split</h3>
+    <p>
+        Each asteroid carries a size tier. A bullet hit spawns a debris burst,
+        adds score, and — unless it was already the smallest tier — pushes two
+        smaller, faster children into next frame's rock list. Clearing them all
+        respawns a fresh wave.
+    </p>
+<pre><code class="language-cpp">// Children go into `out`, not st-&gt;rocks — never mutate the list we're iterating.
+static void split(AppState *st, const Asteroid &amp;a, std::vector&lt;Asteroid&gt; &amp;out) {
+    burst(st, a.x, a.y);                         // recipe-11 particles
+    st-&gt;shake = 0.35f;                            // recipe-16 screen shake
+    if (a.tier &lt;= 0) return;                      // smallest tier: just vanishes
+    for (int i = 0; i &lt; 2; ++i) {
+        float dir = SDL_randf() * 6.2831853f, sp = 40 + a.tier * 30 + SDL_randf() * 40;
+        out.push_back({ a.x, a.y, SDL_cosf(dir)*sp, SDL_sinf(dir)*sp,
+                        (SDL_randf()-0.5f)*3.0f, SDL_randf()*6.2831853f, a.tier - 1, a.seed*7 + i });
+    }
+}
+</code></pre>
+
+    <div class="note">
+        <strong>Deterministic core, juicy surface.</strong> The simulation runs on
+        the recipe-19 fixed-timestep accumulator, so physics is frame-rate
+        independent. The "juice" — particle bursts, a decaying screen-shake offset
+        applied to every draw — is layered on top and never touches the simulation
+        step, so it can't desync the game.
+    </div>
+</section>
+
+<section>
+    <h2>Complete listing</h2>
+    <p>
+        <kbd>←</kbd>/<kbd>→</kbd> rotate, <kbd>↑</kbd> thrusts,
+        <kbd>Space</kbd> fires. Shoot the rocks; getting hit ends the run —
+        <kbd>Enter</kbd> restarts. A fixed-timestep accumulator drives the physics;
+        particles and screen shake add the impact.
+    </p>
+<pre><code class="language-cpp">/*
+ * 28-mini-game-asteroids.cpp — vector Asteroids: wrap-around flight, splitting
+ * rocks, particle bursts and screen shake, on a fixed-timestep core.
+ */
+#define SDL_MAIN_USE_CALLBACKS 1
+#include &lt;SDL3/SDL.h&gt;
+#include &lt;SDL3/SDL_main.h&gt;
+#include &lt;vector&gt;
+#include "gfx.hpp"
+
+static const int WIN_W = 900, WIN_H = 660;
+static const float DT = 1.0f / 120.0f;          // fixed physics step (recipe 19)
+
+static void wrap(float &amp;x, float &amp;y) {
+    if (x &lt; 0) x += WIN_W;  else if (x &gt;= WIN_W) x -= WIN_W;
+    if (y &lt; 0) y += WIN_H;  else if (y &gt;= WIN_H) y -= WIN_H;
+}
+
+struct Ship     { float x, y, vx, vy, a; };
+struct Bullet   { float x, y, vx, vy, life; };
+struct Asteroid { float x, y, vx, vy, spin, ang; int tier, seed; };
+struct Particle { float x, y, vx, vy, life; };
+
+struct AppState {
+    SDL_Window   *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    Ship   ship{};
+    std::vector&lt;Bullet&gt;   bullets;
+    std::vector&lt;Asteroid&gt; rocks;
+    std::vector&lt;Particle&gt; parts;
+    int    score = 0;
+    bool   alive = true;
+    float  shake = 0.0f;                        // decaying screen-shake amount
+    float  accum = 0.0f;                        // fixed-timestep accumulator
+    Uint64 last_ns = 0;
+    Uint32 rng = 0x1234;
+};
+
+// Emit a small debris burst at (x,y) — the recipe-11 particle pattern.
+static void burst(AppState *st, float x, float y) {
+    for (int i = 0; i &lt; 14; ++i) {
+        float a = SDL_randf() * 6.2831853f, s = 40 + SDL_randf() * 160;
+        st-&gt;parts.push_back({ x, y, SDL_cosf(a)*s, SDL_sinf(a)*s, 0.4f + SDL_randf()*0.4f });
+    }
+}
+
+// Children go into `out`, never into the list step() is iterating.
+static void split(AppState *st, const Asteroid &amp;a, std::vector&lt;Asteroid&gt; &amp;out) {
+    burst(st, a.x, a.y);
+    st-&gt;shake = 0.35f;
+    if (a.tier &lt;= 0) return;
+    for (int i = 0; i &lt; 2; ++i) {
+        float dir = SDL_randf() * 6.2831853f, sp = 40 + a.tier * 30 + SDL_randf() * 40;
+        out.push_back({ a.x, a.y, SDL_cosf(dir)*sp, SDL_sinf(dir)*sp,
+                        (SDL_randf()-0.5f)*3.0f, SDL_randf()*6.2831853f, a.tier - 1, a.seed*7 + i });
+    }
+}
+
+// Spawn a wave of big rocks at the edges, away from the ship.
+static void new_wave(AppState *st, int n) {
+    for (int i = 0; i &lt; n; ++i) {
+        float dir = SDL_randf() * 6.2831853f, sp = 30 + SDL_randf() * 50;
+        st-&gt;rocks.push_back({ SDL_randf()*WIN_W, SDL_randf()*40.0f,
+                              SDL_cosf(dir)*sp, SDL_sinf(dir)*sp,
+                              (SDL_randf()-0.5f)*2.0f, 0, 2, (int)(SDL_randf()*1000) });
+    }
+}
+
+static float rock_radius(int tier) { return 12.0f + tier * 12.0f; }
+
+// Draw an n-sided rough polygon (asteroid) using a seeded per-vertex jitter.
+static void draw_rock(SDL_Renderer *r, const Asteroid &amp;a) {
+    const int N = 9;
+    SDL_FPoint pts[N + 1];
+    float rad = rock_radius(a.tier);
+    for (int i = 0; i &lt;= N; ++i) {
+        float ang = a.ang + (i % N) / (float)N * 6.2831853f;
+        float jit = 0.75f + 0.25f * SDL_sinf((float)((a.seed + i) * 53 % 100));
+        pts[i] = { a.x + SDL_cosf(ang) * rad * jit, a.y + SDL_sinf(ang) * rad * jit };
+    }
+    SDL_RenderLines(r, pts, N + 1);
+}
+
+static void reset(AppState *st) {
+    st-&gt;ship = { WIN_W*0.5f, WIN_H*0.5f, 0, 0, -SDL_PI_F/2 };
+    st-&gt;bullets.clear(); st-&gt;rocks.clear(); st-&gt;parts.clear();
+    st-&gt;score = 0; st-&gt;alive = true; st-&gt;shake = 0;
+    new_wave(st, 5);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[])
+{
+    SDL_SetAppMetadata("Asteroids", "1.0", "com.example.sdl3.asteroids");
+    if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("%s", SDL_GetError()); return SDL_APP_FAILURE; }
+    AppState *st = new AppState();
+    if (!SDL_CreateWindowAndRenderer("Asteroids", WIN_W, WIN_H, 0, &amp;st-&gt;window, &amp;st-&gt;renderer)) {
+        SDL_Log("%s", SDL_GetError()); delete st; return SDL_APP_FAILURE;
+    }
+    SDL_SetRenderVSync(st-&gt;renderer, 1);
+    reset(st);
+    st-&gt;last_ns = SDL_GetTicksNS();
+    *appstate = st;
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (e-&gt;type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+    if (e-&gt;type == SDL_EVENT_KEY_DOWN) {
+        if (e-&gt;key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
+        if (e-&gt;key.scancode == SDL_SCANCODE_RETURN &amp;&amp; !st-&gt;alive) reset(st);
+        if (e-&gt;key.scancode == SDL_SCANCODE_SPACE &amp;&amp; st-&gt;alive) {   // fire along the nose
+            st-&gt;bullets.push_back({ st-&gt;ship.x, st-&gt;ship.y,
+                                    st-&gt;ship.vx + SDL_cosf(st-&gt;ship.a)*520.0f,
+                                    st-&gt;ship.vy + SDL_sinf(st-&gt;ship.a)*520.0f, 0.9f });
+        }
+    }
+    return SDL_APP_CONTINUE;
+}
+
+// One fixed physics step.
+static void step(AppState *st) {
+    const bool *k = SDL_GetKeyboardState(nullptr);
+    if (st-&gt;alive) {
+        if (k[SDL_SCANCODE_LEFT])  st-&gt;ship.a -= 3.2f * DT;
+        if (k[SDL_SCANCODE_RIGHT]) st-&gt;ship.a += 3.2f * DT;
+        if (k[SDL_SCANCODE_UP]) {
+            st-&gt;ship.vx += SDL_cosf(st-&gt;ship.a) * 260.0f * DT;
+            st-&gt;ship.vy += SDL_sinf(st-&gt;ship.a) * 260.0f * DT;
+            if (SDL_randf() &lt; 0.5f) {              // engine sparks out the back
+                float ba = st-&gt;ship.a + SDL_PI_F;
+                st-&gt;parts.push_back({ st-&gt;ship.x + SDL_cosf(ba)*12, st-&gt;ship.y + SDL_sinf(ba)*12,
+                                      SDL_cosf(ba)*80, SDL_sinf(ba)*80, 0.25f });
+            }
+        }
+        st-&gt;ship.vx *= 0.995f; st-&gt;ship.vy *= 0.995f;
+        st-&gt;ship.x += st-&gt;ship.vx * DT; st-&gt;ship.y += st-&gt;ship.vy * DT; wrap(st-&gt;ship.x, st-&gt;ship.y);
+    }
+
+    for (auto &amp;b : st-&gt;bullets) { b.x += b.vx*DT; b.y += b.vy*DT; wrap(b.x, b.y); b.life -= DT; }
+    for (auto &amp;a : st-&gt;rocks)   { a.x += a.vx*DT; a.y += a.vy*DT; wrap(a.x, a.y); a.ang += a.spin*DT; }
+    for (auto &amp;p : st-&gt;parts)   { p.x += p.vx*DT; p.y += p.vy*DT; p.life -= DT; }
+
+    // Bullet vs rock: rebuild the rock list from survivors + any split children.
+    std::vector&lt;Asteroid&gt; next;
+    for (auto &amp;a : st-&gt;rocks) {
+        bool hit = false;
+        for (auto &amp;b : st-&gt;bullets) {
+            if (b.life &lt;= 0) continue;
+            float dx = b.x - a.x, dy = b.y - a.y, rr = rock_radius(a.tier);
+            if (dx*dx + dy*dy &lt; rr*rr) { b.life = 0; hit = true; st-&gt;score += (a.tier + 1) * 10; break; }
+        }
+        if (hit) split(st, a, next);               // burst + push children into `next`
+        else     next.push_back(a);                // survivor carries over
+    }
+    st-&gt;rocks.swap(next);
+
+    // Ship vs rock.
+    if (st-&gt;alive)
+        for (auto &amp;a : st-&gt;rocks) {
+            float dx = st-&gt;ship.x - a.x, dy = st-&gt;ship.y - a.y, rr = rock_radius(a.tier) + 8;
+            if (dx*dx + dy*dy &lt; rr*rr) { st-&gt;alive = false; burst(st, st-&gt;ship.x, st-&gt;ship.y); st-&gt;shake = 0.8f; }
+        }
+
+    // Cull dead bullets / particles; respawn a wave when the field is clear.
+    for (size_t i = st-&gt;bullets.size(); i-- &gt; 0; ) if (st-&gt;bullets[i].life &lt;= 0) { st-&gt;bullets[i] = st-&gt;bullets.back(); st-&gt;bullets.pop_back(); }
+    for (size_t i = st-&gt;parts.size();   i-- &gt; 0; ) if (st-&gt;parts[i].life   &lt;= 0) { st-&gt;parts[i]   = st-&gt;parts.back();   st-&gt;parts.pop_back();   }
+    if (st-&gt;alive &amp;&amp; st-&gt;rocks.empty()) new_wave(st, 6);
+
+    if (st-&gt;shake &gt; 0) st-&gt;shake = SDL_max(0.0f, st-&gt;shake - DT * 2.0f);
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    Uint64 now = SDL_GetTicksNS();
+    float frame = (now - st-&gt;last_ns) / 1.0e9f;
+    st-&gt;last_ns = now;
+    if (frame &gt; 0.1f) frame = 0.1f;              // clamp after a stall
+
+    st-&gt;accum += frame;                          // fixed-timestep accumulator (recipe 19)
+    while (st-&gt;accum &gt;= DT) { step(st); st-&gt;accum -= DT; }
+
+    // Screen shake: offset every draw by a decaying random vector.
+    float ox = 0, oy = 0;
+    if (st-&gt;shake &gt; 0) { ox = (SDL_randf()*2-1) * st-&gt;shake * 14; oy = (SDL_randf()*2-1) * st-&gt;shake * 14; }
+
+    gfx::clear(st-&gt;renderer, 8, 9, 16);
+
+    gfx::set_color(st-&gt;renderer, 255, 240, 180, 255);       // particles
+    for (const auto &amp;p : st-&gt;parts) gfx::fill_rect(st-&gt;renderer, p.x + ox - 1, p.y + oy - 1, 2, 2);
+
+    gfx::set_color(st-&gt;renderer, 180, 200, 255, 255);       // rocks
+    for (auto &amp;a : st-&gt;rocks) { Asteroid d = a; d.x += ox; d.y += oy; draw_rock(st-&gt;renderer, d); }
+
+    gfx::set_color(st-&gt;renderer, 120, 255, 180, 255);       // bullets
+    for (const auto &amp;b : st-&gt;bullets) gfx::fill_rect(st-&gt;renderer, b.x + ox - 1.5f, b.y + oy - 1.5f, 3, 3);
+
+    if (st-&gt;alive) {                                        // the ship: a triangle along its heading
+        float a = st-&gt;ship.a;
+        SDL_FPoint nose = { st-&gt;ship.x + SDL_cosf(a)*14 + ox,           st-&gt;ship.y + SDL_sinf(a)*14 + oy };
+        SDL_FPoint l    = { st-&gt;ship.x + SDL_cosf(a+2.6f)*11 + ox,      st-&gt;ship.y + SDL_sinf(a+2.6f)*11 + oy };
+        SDL_FPoint r    = { st-&gt;ship.x + SDL_cosf(a-2.6f)*11 + ox,      st-&gt;ship.y + SDL_sinf(a-2.6f)*11 + oy };
+        SDL_FPoint ship[4] = { nose, l, r, nose };
+        gfx::set_color(st-&gt;renderer, 230, 240, 255, 255);
+        SDL_RenderLines(st-&gt;renderer, ship, 4);
+    }
+
+    // Score as a row of pips; a bar across the screen on game over.
+    gfx::set_color(st-&gt;renderer, 240, 220, 120, 255);
+    for (int i = 0; i &lt; st-&gt;score / 10 &amp;&amp; i &lt; 60; ++i) gfx::fill_rect(st-&gt;renderer, 12.0f + i*12, 12, 8, 8);
+    if (!st-&gt;alive) {
+        SDL_SetRenderDrawBlendMode(st-&gt;renderer, SDL_BLENDMODE_BLEND);
+        gfx::set_color(st-&gt;renderer, 20, 10, 10, 150);
+        gfx::fill_rect(st-&gt;renderer, 0, WIN_H*0.5f - 30, (float)WIN_W, 60);
+        gfx::set_color(st-&gt;renderer, 255, 120, 120, 255);
+        gfx::fill_rect(st-&gt;renderer, WIN_W*0.5f - 100, WIN_H*0.5f - 6, 200, 12);   // "GAME OVER" plate
+    }
+
+    SDL_RenderPresent(st-&gt;renderer);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult)
+{
+    AppState *st = static_cast&lt;AppState *&gt;(appstate);
+    if (st) {
+        SDL_DestroyRenderer(st-&gt;renderer);
+        SDL_DestroyWindow(st-&gt;window);
+        delete st;
+    }
+}
+</code></pre>
+    <div class="note">
+        <strong>One scratch list per step.</strong> The collision pass reads
+        <code>st-&gt;rocks</code> but writes survivors and split children into a
+        separate <code>next</code> vector, swapped in at the end. That's the same
+        deferred-mutation discipline as the recipe-24 scene stack: never resize the
+        container you're currently iterating, and there's a single obvious source of
+        truth each frame.
+    </div>
+</section>
+
+<section>
+    <h2>Try it yourself</h2>
+    <ol>
+        <li>Give the ship lives and a brief invulnerability blink on respawn instead of an instant game over.</li>
+        <li>Add a UFO that crosses the field and shoots back — its own tiny wrap-around AI.</li>
+        <li>Wire in audio from <a href="14-music-and-mixing.html">recipe 14</a>: a thrust rumble, a fire blip, an explosion per split.</li>
+        <li>Draw a real score and "GAME OVER" with the <a href="09-text-rendering.html">recipe-09</a> bitmap font in place of the pip/plate placeholders.</li>
+    </ol>
+    <p>
+        And that closes the 2D track. You went from a blank window to textures,
+        audio and a full Pong, then render targets, custom meshes, deterministic
+        timing and 2D lighting, and finally the systems a real game leans on:
+        streaming pixel effects, pathfinding, spatial acceleration, and this
+        vector Asteroids that stitches particles, screen shake, a fixed timestep and
+        state handling into one loop. The high-level <code>SDL_Renderer</code> took
+        you a long way — when you're ready to drop a tier and drive the GPU
+        directly, the <a href="../3d/index.html">3D Track</a> picks up with the same
+        callback skeleton and a "hello triangle", then climbs all the way to a
+        deferred renderer and beyond.
+    </p>
+</section>
+
+<nav class="footnav">
+    <a href="27-spatial-hashing.html">← 27. Spatial Hashing</a>
+    <a href="index.html">Index</a>
+    <a href="../3d/index.html">3D Track →</a>
+</nav>
+
+</main>
+
+<footer class="site-footer">
+    <a href="../index.html">SDL3 Recipes</a> · <a href="index.html">2D Track</a> · Recipe 28
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+</body>
+</html>

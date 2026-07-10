@@ -41,9 +41,9 @@ When verifying link integrity, treat the `../` / `../../` references to
 
 ```
 index.html  (landing — three track cards)
-  ├── 2d/index.html    → 2d/01-*.html … 2d/20-*.html
-  ├── 3d/index.html    → 3d/01-*.html … 3d/21-*.html
-  └── bgfx/index.html  → bgfx/01-*.html … bgfx/20-*.html
+  ├── 2d/index.html    → 2d/01-*.html … 2d/28-*.html
+  ├── 3d/index.html    → 3d/01-*.html … 3d/31-*.html
+  └── bgfx/index.html  → bgfx/01-*.html … bgfx/28-*.html
 ```
 
 - **Root → track → recipe.** `index.html` links to the three track index pages;
@@ -104,7 +104,7 @@ Two non-page artifacts document how the site was built:
 Because there is no test suite, correctness is checked structurally:
 
 1. **Counts** — `ls 2d/[0-9]*.html 3d/[0-9]*.html bgfx/[0-9]*.html` must match the
-   numbers stated across the index pages (currently 20 / 21 / 20).
+   numbers stated across the index pages (currently 28 / 31 / 28).
 2. **Links** — every *intra-repo* link resolves; only the documented `../` /
    `../../` parent-template references may dangle.
 3. **Code blocks** — no unescaped `<` / `>` / `&` inside any `<pre><code>`, and the

@@ -327,20 +327,18 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
         <li>Add a transition scene that cross-fades between two scenes by drawing both at varying alpha — a translucent scene that owns its own timer.</li>
     </ol>
     <p>
-        And that's the 2D track. You went from a blank window to textures, audio,
-        a full Pong, render targets, custom meshes, deterministic timing, 2D
-        lighting, and now the camera, tweening and scene architecture that hold a
-        real game together. The high-level <code>SDL_Renderer</code> took you a
-        long way — when you're ready to drop a tier and drive the GPU directly,
-        the <a href="../3d/index.html">3D Track</a> picks up with the same callback
-        skeleton and a "hello triangle".
+        With the scene stack in place you have the architectural frame a real game
+        slots into. The next recipes fill it in with systems that scale: streaming
+        pixel effects, grid pathfinding, spatial acceleration for hundreds of
+        entities, and a second capstone — a vector <a href="28-mini-game-asteroids.html">Asteroids</a>
+        — before the track hands off to 3D.
     </p>
 </section>
 
 <nav class="footnav">
     <a href="23-tweening-and-easing.html">← 23. Tweening &amp; Easing</a>
     <a href="index.html">Index</a>
-    <a href="../3d/index.html">3D Track →</a>
+    <a href="25-streaming-textures.html">Next: Streaming Textures →</a>
 </nav>
 
 </main>
